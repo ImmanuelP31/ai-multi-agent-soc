@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual Environment
+venv/
+
+# Models
+*.pkl
+*.h5
+
+# Sequence Files
+*.npy
+
+# Large Datasets
+*.csv
+*.parquet
+
+# Logs
+logs/
+
+# OS Files
+.DS_Store
+Thumbs.db

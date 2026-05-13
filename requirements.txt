@@ -1,6 +1,112 @@
-# Host-side Kafka scripts (kafka/producer.py, kafka/consumer.py)
-kafka-python>=2.0,<3
+# =========================
+# CORE BACKEND
+# =========================
 
-# Detection agent → PostgreSQL
-sqlalchemy>=2.0
-psycopg2-binary>=2.9
+fastapi
+uvicorn[standard]
+
+# =========================
+# DATABASE
+# =========================
+
+sqlalchemy
+psycopg2-binary
+
+# =========================
+# KAFKA
+# =========================
+
+kafka-python
+
+# =========================
+# REDIS
+# =========================
+
+redis
+
+# =========================
+# DATA PROCESSING
+# =========================
+
+pandas
+numpy
+pyarrow
+
+# =========================
+# MACHINE LEARNING
+# =========================
+
+scikit-learn
+xgboost
+lightgbm
+joblib
+
+# =========================
+# DEEP LEARNING
+# =========================
+
+tensorflow
+
+# =========================
+# VISUALIZATION
+# =========================
+
+matplotlib
+plotly
+
+# =========================
+# CYBERSECURITY / MALWARE
+# =========================
+
+pefile
+yara-python
+capstone
+
+# =========================
+# VECTOR DATABASE / RAG
+# =========================
+
+chromadb
+faiss-cpu
+sentence-transformers
+
+# =========================
+# LANGCHAIN / AGENTS
+# =========================
+
+langchain
+langgraph
+
+# =========================
+# API CLIENTS
+# =========================
+
+requests
+httpx
+
+# =========================
+# UTILITIES
+# =========================
+
+python-dotenv
+tqdm
+
+# =========================
+# MONITORING
+# =========================
+
+prometheus-client
+
+# =========================
+# WEBSOCKETS
+# =========================
+
+websockets
+
+# =========================
+# OPTIONAL LLM SUPPORT
+# =========================
+
+openai
+groq
+ollama

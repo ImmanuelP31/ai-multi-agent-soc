@@ -104,3 +104,11 @@ for message in consumer:
             file=sys.stderr,
             flush=True,
         )
+
+import requests
+
+requests.post(
+    "http://localhost:8000/push-alert",
+    json=alert
+)
+

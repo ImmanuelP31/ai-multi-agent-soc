@@ -1,17 +1,39 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+import random
 
 app = FastAPI()
 
-@app.get("/")
-def home():
-    return {"message": "AI SOC Backend Running"}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-import redis
+@app.websocket("/ws/live-alerts")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
 
-redis_client = redis.Redis(host="redis", port=6379, decode_responses=True)
+    while True:
+        fake_alert = {
+            "event": random.choice([
+                "Port Scan",
+                "Brute Force",
+                "Privilege Escalation",
+                "Data Exfiltration"
+            ]),
+            "severity": random.choice([
+                "LOW",
+                "MEDIUM",
+                "HIGH",
+                "CRITICAL"
+            ]),
+            "ip": f"192.168.1.{random.randint(1,255)}"
+        }
 
-@app.get("/redis-test")
-def redis_test():
-    redis_client.set("status", "Redis Connected")
-    value = redis_client.get("status")
-    return {"redis_message": value}
+        await websocket.send_json(fake_alert)
+
+        await asyncio.sleep(2)
