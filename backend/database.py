@@ -15,15 +15,70 @@ class Base(DeclarativeBase):
 
 
 class SocAlert(Base):
-    """One row per detection alert — historical analysis, querying, dashboards."""
+    """
+    Central SOC incident table.
+
+    Stores:
+    - raw alerts
+    - sequence correlations
+    - investigations
+    - threat intel enrichments
+    """
 
     __tablename__ = "soc_alerts"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    event: Mapped[str] = mapped_column(String(255))
-    severity: Mapped[str] = mapped_column(String(64))
-    ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True
+    )
+
+    event: Mapped[str] = mapped_column(
+        String(255)
+    )
+
+    severity: Mapped[str] = mapped_column(
+        String(64)
+    )
+
+    ip: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True
+    )
+
+    user: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True
+    )
+
+    investigation: Mapped[Optional[str]] = mapped_column(
+        String(1000),
+        nullable=True
+    )
+
+    mitre_attack: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True
+    )
+
+    predicted_next_attack: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True
+    )
+
+    confidence: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True
+    )
+
+    agent_source: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        nullable=True
+    )
+
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True)
+    )
 
 
 def get_database_url() -> str:
@@ -61,20 +116,64 @@ def timestamp_from_alert(alert: dict) -> datetime:
 
 
 def persist_alert(alert: dict) -> None:
-    """Insert one alert row."""
+    """
+    Persist SOC alerts into PostgreSQL.
+    """
+
     init_engine()
+
     session = SessionLocal()
+
     try:
+
         row = SocAlert(
-            event=alert["event"],
-            severity=alert["severity"],
+            event=alert.get("event", "unknown"),
+
+            severity=alert.get(
+                "severity",
+                "LOW"
+            ),
+
             ip=alert.get("ip"),
-            timestamp=timestamp_from_alert(alert),
+
+            user=alert.get("user"),
+
+            investigation=alert.get(
+                "investigation"
+            ),
+
+            mitre_attack=alert.get(
+                "mitre_attack"
+            ),
+
+            predicted_next_attack=alert.get(
+                "predicted_next_attack"
+            ),
+
+            confidence=str(
+                alert.get("confidence")
+            ) if alert.get("confidence") else None,
+
+            agent_source=alert.get(
+                "agent_source"
+            ),
+
+            timestamp=timestamp_from_alert(
+                alert
+            ),
         )
+
         session.add(row)
+
         session.commit()
+
     except Exception:
+
         session.rollback()
+
         raise
+
     finally:
+
         session.close()
+        
