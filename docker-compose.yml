@@ -1,0 +1,91 @@
+services:
+
+  backend:
+    build: .
+    container_name: ai_soc_backend
+
+    ports:
+      - "8000:8000"
+
+    depends_on:
+      - postgres
+      - redis
+      - zookeeper
+      - kafka
+
+    volumes:
+      - .:/app
+
+    environment:
+      DATABASE_URL: postgresql://socuser:socpass@postgres:5432/socdb
+      REDIS_HOST: redis
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+  postgres:
+    image: postgres:15
+
+    container_name: ai_soc_postgres
+
+    restart: always
+
+    environment:
+      POSTGRES_USER: socuser
+      POSTGRES_PASSWORD: socpass
+      POSTGRES_DB: socdb
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+
+    container_name: ai_soc_redis
+
+    restart: always
+
+    ports:
+      - "6379:6379"
+
+  # Same Bitnami-style ZooKeeper + Kafka as your original plan. Public `bitnami/*` tags are gone from
+  # Docker Hub; use `bitnamilegacy/*` with pinned tags. Avoid `bitnamilegacy/kafka:latest` — it tracks
+  # newer images that expect KRaft (`KAFKA_CFG_PROCESS_ROLES`), not the beginner ZK + broker flow.
+  zookeeper:
+    image: bitnamilegacy/zookeeper:3.9.3-debian-12-r22
+
+    container_name: ai_soc_zookeeper
+
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: bitnamilegacy/kafka:3.7.1-debian-12-r9
+
+    container_name: ai_soc_kafka
+
+    hostname: kafka
+
+    ports:
+      # Host scripts (producer.py on Windows): use localhost:9094 — avoids advertised-hostname issues.
+      - "9094:9094"
+
+    environment:
+      KAFKA_BROKER_ID: "1"
+      KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      # INTERNAL: other containers use kafka:9092. EXTERNAL: your machine uses localhost:9094.
+      KAFKA_CFG_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094
+      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+    depends_on:
+      - zookeeper
+
+volumes:
+  postgres_data:

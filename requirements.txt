@@ -1,0 +1,6 @@
+# Host-side Kafka scripts (kafka/producer.py, kafka/consumer.py)
+kafka-python>=2.0,<3
+
+# Detection agent → PostgreSQL
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
