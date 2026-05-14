@@ -1,4 +1,16 @@
 {
     "sequence_length": 5,
-    "num_features": 6
+    "num_features": 6,
+    "num_classes": 15,
+    "feature_columns": [
+        "attack_encoded",
+        "severity_encoded",
+        "anomaly_score",
+        "packet_rate",
+        "attack_frequency",
+        "repeated_ip"
+    ],
+    "dataset_size": 2829380,
+    "test_accuracy": 85.07,
+    "test_loss": 0.4821
 }

@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import DateTime, Integer, String, create_engine
+from sqlalchemy import DateTime, Integer, String, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -102,8 +102,51 @@ def init_engine():
 
 def init_db() -> None:
     """Create tables if they do not exist."""
-    init_engine()
+    engine = init_engine()
     Base.metadata.create_all(bind=_engine)
+    ensure_soc_alert_schema(engine)
+
+
+def ensure_soc_alert_schema(engine) -> None:
+    """Add columns introduced after an existing database was first created."""
+
+    inspector = inspect(engine)
+    if not inspector.has_table(SocAlert.__tablename__):
+        return
+
+    existing_columns = {
+        column["name"]
+        for column in inspector.get_columns(SocAlert.__tablename__)
+    }
+
+    expected_columns = {
+        "ip": "VARCHAR(64)",
+        "user": "VARCHAR(255)",
+        "investigation": "VARCHAR(1000)",
+        "mitre_attack": "VARCHAR(255)",
+        "predicted_next_attack": "VARCHAR(255)",
+        "confidence": "VARCHAR(64)",
+        "agent_source": "VARCHAR(128)",
+    }
+
+    missing_columns = [
+        (name, column_type)
+        for name, column_type in expected_columns.items()
+        if name not in existing_columns
+    ]
+
+    if not missing_columns:
+        return
+
+    with engine.begin() as connection:
+        for name, column_type in missing_columns:
+            quoted_name = f'"{name}"' if name == "user" else name
+            connection.execute(
+                text(
+                    f"ALTER TABLE {SocAlert.__tablename__} "
+                    f"ADD COLUMN {quoted_name} {column_type}"
+                )
+            )
 
 
 def timestamp_from_alert(alert: dict) -> datetime:
