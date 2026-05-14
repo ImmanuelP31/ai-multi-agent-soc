@@ -1,4 +1,4 @@
-# AI Multi-Agent SOC Dashboard
+# AI Multi-Agent SOC(Security Operations Center) Dashboard
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)
