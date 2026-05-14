@@ -4,17 +4,25 @@ import { FaShieldAlt, FaBug, FaExclamationTriangle } from "react-icons/fa";
 import api from "../services/api";
 
 export default function StatsCards() {
-  const [stats,   setStats]   = useState({ total_alerts: 0, critical_count: 0, malware_count: 0 });
+  const [stats, setStats] = useState({
+    total_alerts: 0,
+    critical_count: 0,
+    malware_count: 0,
+  });
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
   const fetchStats = () => {
-    api.get("/alerts/stats")
+    api
+      .get("/alerts/stats")
       .then((res) => {
         setStats(res.data);
+        setError(false);
         setLoading(false);
       })
       .catch((err) => {
         console.error(err);
+        setError(true);
         setLoading(false);
       });
   };
@@ -29,39 +37,43 @@ export default function StatsCards() {
     {
       title: "Total Alerts",
       value: stats.total_alerts ?? 0,
-      icon:  <FaShieldAlt />,
+      icon: <FaShieldAlt />,
       color: "text-info",
+      bg: "bg-info/10",
     },
     {
       title: "Critical Threats",
       value: stats.critical_count ?? 0,
-      icon:  <FaExclamationTriangle />,
+      icon: <FaExclamationTriangle />,
       color: "text-danger",
+      bg: "bg-danger/10",
     },
     {
       title: "Malware Events",
       value: stats.malware_count ?? 0,
-      icon:  <FaBug />,
+      icon: <FaBug />,
       color: "text-warning",
+      bg: "bg-warning/10",
     },
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-      {cards.map((item, idx) => (
-        <motion.div
-          key={idx}
-          whileHover={{ scale: 1.04 }}
-          className="card shadow-neon"
-        >
-          <div className="flex justify-between items-center">
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+      {cards.map((item) => (
+        <motion.div key={item.title} whileHover={{ y: -2 }} className="card">
+          <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-gray-400">{item.title}</p>
-              <h1 className="text-3xl font-bold mt-2">
-                {loading ? "—" : item.value.toLocaleString()}
-              </h1>
+              <p className="muted">{item.title}</p>
+              <p className="mt-2 text-4xl font-semibold leading-none text-white">
+                {loading ? "..." : item.value.toLocaleString()}
+              </p>
+              {error && <p className="mt-2 text-xs text-danger">API unavailable</p>}
             </div>
-            <div className={`text-4xl ${item.color}`}>{item.icon}</div>
+            <div
+              className={`grid h-12 w-12 place-items-center rounded-lg ${item.bg} text-2xl ${item.color}`}
+            >
+              {item.icon}
+            </div>
           </div>
         </motion.div>
       ))}

@@ -4,6 +4,7 @@ sqlalchemy
 psycopg2-binary
 redis
 kafka-python
+websockets
 pandas
 numpy
 scikit-learn

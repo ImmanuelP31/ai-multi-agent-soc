@@ -1,13 +1,6 @@
 """
 backend/main.py
-----------------
-FastAPI backend for the AI SOC system.
-
-Endpoints:
-  GET  /                      → health check
-  GET  /alerts                → last N alerts from PostgreSQL
-  GET  /alerts/stats          → severity counts + top IPs for dashboard charts
-  WS   /ws/live-alerts        → WebSocket stream; pushes every new alert in real time
+AI SOC Backend
 """
 
 import asyncio
@@ -17,11 +10,10 @@ import threading
 import sys
 from pathlib import Path
 
-import redis as redis_lib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from kafka import KafkaConsumer
-from sqlalchemy import func, text
+from sqlalchemy import func
 
 # =========================================================
 # LOCAL IMPORTS
@@ -33,11 +25,19 @@ from backend.database import (
     init_db,
     SessionLocal,
     SocAlert,
-    init_engine,
 )
 
 from backend.routes import alerts as alerts_router
 from backend.routes import sequences as sequences_router
+
+# =========================================================
+# OPTIONAL REDIS IMPORT
+# =========================================================
+
+try:
+    import redis as redis_lib
+except Exception:
+    redis_lib = None
 
 # =========================================================
 # FASTAPI APP
@@ -57,46 +57,60 @@ app.add_middleware(
 # ROUTERS
 # =========================================================
 
-# Registers:
-# /alerts/*
-# /sequences/*
 app.include_router(alerts_router.router)
 app.include_router(sequences_router.router)
 
 # =========================================================
-# REDIS CONFIG
+# CONFIG
 # =========================================================
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-REDIS_CHANNEL = "live_alerts"
-
-def get_redis() -> redis_lib.Redis:
-    return redis_lib.Redis(
-        host=REDIS_HOST,
-        port=6379,
-        decode_responses=True,
-    )
-
-# =========================================================
-# KAFKA CONFIG
-# =========================================================
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 
 KAFKA_BOOTSTRAP = os.environ.get(
     "KAFKA_BOOTSTRAP_SERVERS",
     "localhost:9094"
 )
 
+REDIS_CHANNEL = "live_alerts"
+
+# =========================================================
+# REDIS
+# =========================================================
+
+def get_redis():
+    """
+    Lazy Redis connection.
+    Never crashes backend startup.
+    """
+
+    if redis_lib is None:
+        return None
+
+    try:
+        r = redis_lib.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            decode_responses=True,
+            socket_connect_timeout=2,
+        )
+
+        r.ping()
+
+        return r
+
+    except Exception as e:
+        print(f"[REDIS] unavailable: {e}")
+        return None
+
 # =========================================================
 # KAFKA → REDIS BRIDGE
 # =========================================================
 
 def kafka_to_redis_bridge():
-    """
-    Background thread:
-    Kafka consumer → Redis pub/sub
-    """
 
     try:
+
         consumer = KafkaConsumer(
             "remediation_actions",
             bootstrap_servers=KAFKA_BOOTSTRAP,
@@ -106,32 +120,42 @@ def kafka_to_redis_bridge():
             ),
         )
 
-        r = get_redis()
-
-        print("Kafka→Redis bridge started")
+        print("[KAFKA] bridge connected")
 
         for message in consumer:
+
             alert = message.value
 
-            r.publish(
-                REDIS_CHANNEL,
-                json.dumps(alert, default=str)
-            )
+            r = get_redis()
+
+            if not r:
+                continue
+
+            try:
+
+                r.publish(
+                    REDIS_CHANNEL,
+                    json.dumps(alert, default=str)
+                )
+
+            except Exception as e:
+                print(f"[REDIS] publish failed: {e}")
 
     except Exception as e:
-        print(f"Kafka→Redis bridge error: {e}")
+        print(f"[KAFKA] bridge failed: {e}")
 
 # =========================================================
 # STARTUP
 # =========================================================
 
 @app.on_event("startup")
-def on_startup():
-    """
-    Initialize DB and start Kafka bridge thread.
-    """
+def startup():
+
+    print("[STARTUP] Initializing database")
 
     init_db()
+
+    print("[STARTUP] Starting Kafka bridge thread")
 
     t = threading.Thread(
         target=kafka_to_redis_bridge,
@@ -141,7 +165,7 @@ def on_startup():
     t.start()
 
 # =========================================================
-# WEBSOCKET — LIVE ALERTS
+# WEBSOCKET
 # =========================================================
 
 @app.websocket("/ws/live-alerts")
@@ -151,11 +175,25 @@ async def websocket_endpoint(websocket: WebSocket):
 
     r = get_redis()
 
+    if not r:
+        await websocket.send_text(json.dumps({
+            "event": "system",
+            "severity": "LOW",
+            "message": "Redis unavailable"
+        }))
+
+        await websocket.close()
+
+        return
+
     pubsub = r.pubsub()
 
     pubsub.subscribe(REDIS_CHANNEL)
 
+    print("[WS] client connected")
+
     try:
+
         loop = asyncio.get_event_loop()
 
         while True:
@@ -172,166 +210,31 @@ async def websocket_endpoint(websocket: WebSocket):
                 message
                 and message.get("type") == "message"
             ):
+
                 await websocket.send_text(
                     message["data"]
                 )
 
+            await asyncio.sleep(0.05)
+
     except WebSocketDisconnect:
-        # Client disconnected cleanly
-        pass
+
+        print("[WS] client disconnected")
 
     except Exception as e:
-        print(f"WebSocket error: {e}")
+
+        print(f"[WS] error: {e}")
+
+    finally:
 
         try:
-            await websocket.close()
+            pubsub.unsubscribe(REDIS_CHANNEL)
+            pubsub.close()
         except:
             pass
 
-    finally:
-        pubsub.unsubscribe(REDIS_CHANNEL)
-        pubsub.close()
-
 # =========================================================
-# REST — ALERTS
-# =========================================================
-
-@app.get("/alerts")
-def get_alerts(limit: int = 50, skip: int = 0):
-
-    limit = min(limit, 500)
-
-    init_engine()
-
-    session = SessionLocal()
-
-    try:
-
-        rows = (
-            session.query(SocAlert)
-            .order_by(SocAlert.id.desc())
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
-
-        return [
-            {
-                "id": r.id,
-                "event": r.event,
-                "severity": r.severity,
-                "ip": r.ip,
-                "user": r.user,
-                "investigation": r.investigation,
-                "mitre_attack": r.mitre_attack,
-                "predicted_next_attack": r.predicted_next_attack,
-                "confidence": r.confidence,
-                "timestamp": (
-                    r.timestamp.isoformat()
-                    if r.timestamp else None
-                ),
-            }
-            for r in rows
-        ]
-
-    finally:
-        session.close()
-
-# =========================================================
-# REST — STATS
-# =========================================================
-
-@app.get("/alerts/stats")
-def get_stats():
-
-    init_engine()
-
-    session = SessionLocal()
-
-    try:
-
-        total = (
-            session.query(func.count(SocAlert.id))
-            .scalar() or 0
-        )
-
-        severity_rows = (
-            session.query(
-                SocAlert.severity,
-                func.count(SocAlert.id),
-            )
-            .group_by(SocAlert.severity)
-            .all()
-        )
-
-        severity_counts = {
-            sev: cnt
-            for sev, cnt in severity_rows
-        }
-
-        for level in (
-            "LOW",
-            "MEDIUM",
-            "HIGH",
-            "CRITICAL",
-        ):
-            severity_counts.setdefault(level, 0)
-
-        severity_chart = [
-            {
-                "severity": k,
-                "count": v,
-            }
-            for k, v in severity_counts.items()
-        ]
-
-        top_ips_rows = (
-            session.query(
-                SocAlert.ip,
-                func.count(SocAlert.id).label("count"),
-            )
-            .filter(SocAlert.ip.isnot(None))
-            .group_by(SocAlert.ip)
-            .order_by(text("count DESC"))
-            .limit(5)
-            .all()
-        )
-
-        top_ips = [
-            {
-                "ip": ip,
-                "count": cnt,
-            }
-            for ip, cnt in top_ips_rows
-        ]
-
-        malware_count = (
-            session.query(func.count(SocAlert.id))
-            .filter(
-                SocAlert.event == "malware_detected"
-            )
-            .scalar() or 0
-        )
-
-        critical_count = severity_counts.get(
-            "CRITICAL",
-            0,
-        )
-
-        return {
-            "total_alerts": total,
-            "severity_counts": severity_counts,
-            "severity_chart": severity_chart,
-            "top_ips": top_ips,
-            "critical_count": critical_count,
-            "malware_count": malware_count,
-        }
-
-    finally:
-        session.close()
-
-# =========================================================
-# HEALTH CHECK
+# REST
 # =========================================================
 
 @app.get("/")
@@ -340,4 +243,16 @@ def home():
     return {
         "status": "ok",
         "message": "AI SOC Backend Running",
+    }
+
+# =========================================================
+# FALLBACK STATS
+# =========================================================
+
+@app.get("/health")
+def health():
+
+    return {
+        "backend": "healthy",
+        "redis": bool(get_redis()),
     }
