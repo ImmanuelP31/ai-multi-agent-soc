@@ -1,420 +1,226 @@
-# Autonomous Multi-Agent AI SOC
+# AI Multi-Agent SOC Dashboard
 
-AI-driven distributed Security Operations Center (SOC) built using:
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-Dashboard-61DAFB?style=for-the-badge&logo=react&logoColor=0B1020)
+![Kafka](https://img.shields.io/badge/Kafka-Streaming-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Persistence-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
 
-* Real-time streaming pipelines
-* Machine learning-based intrusion detection
-* Multi-agent orchestration
-* Kafka event processing
-* Distributed security workflows
-* Cybersecurity traffic analysis
+An end-to-end autonomous Security Operations Center built with real-time event streaming, AI-powered detection, multi-agent investigation, remediation workflows, and a polished live analyst dashboard.
 
-The system simulates a modern SOC architecture where AI models actively analyze network events, classify threats, estimate severity, and coordinate autonomous response agents.
+![AI Multi-Agent SOC Dashboard demo](docs/assets/soc-dashboard-demo.gif)
 
----
+## Why This Project Stands Out
 
-# Architecture Overview
+This project simulates a modern AI-assisted SOC pipeline where multiple agents collaborate over Kafka to detect, enrich, investigate, remediate, and report security incidents in real time.
 
-```text
-                    ┌────────────────────┐
-                    │ Attack Simulator   │
-                    └─────────┬──────────┘
-                              │
-                              ▼
-                    ┌────────────────────┐
-                    │ Kafka: raw_logs    │
-                    └─────────┬──────────┘
-                              │
-                              ▼
-                  ┌─────────────────────────┐
-                  │ Detection Agent         │
-                  │                         │
-                  │ - Feature Extraction    │
-                  │ - Isolation Forest      │
-                  │ - Random Forest/XGB     │
-                  │ - Severity Prediction   │
-                  └─────────┬──────────────┘
-                            │
-                            ▼
-                 ┌─────────────────────────┐
-                 │ Kafka: security_alerts  │
-                 └─────────┬──────────────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        ▼                  ▼                  ▼
-┌────────────────┐ ┌────────────────┐ ┌────────────────┐
-│ Threat Intel   │ │ Remediation    │ │ Reporting      │
-│ Agent          │ │ Agent          │ │ Agent          │
-└────────────────┘ └────────────────┘ └────────────────┘
-```
+It is designed to demonstrate production-oriented engineering skills across distributed systems, ML integration, backend APIs, Dockerized infrastructure, and frontend observability.
 
----
+## Core Capabilities
 
-# Core Features
+- Real-time security event pipeline using Kafka topics.
+- FastAPI backend with REST endpoints and WebSocket streaming.
+- PostgreSQL persistence for alert history and dashboard analytics.
+- Redis pub/sub bridge for live SOC feed updates.
+- Multi-agent workflow for detection, investigation, threat intelligence, remediation, and reporting.
+- ML-based anomaly and intrusion detection components.
+- LSTM-style sequence prediction surface for next-attack forecasting.
+- React dashboard with live stats, severity chart, alert table, predictions, and threat feed.
+- Fully Dockerized infrastructure for repeatable local runs.
 
-## Real-Time Streaming Infrastructure
-
-* Apache Kafka event streaming
-* Distributed event-driven architecture
-* Dockerized services
-* Redis caching layer
-* PostgreSQL persistence
-* FastAPI backend
-
----
-
-## AI-Driven Threat Detection
-
-### 1. Isolation Forest Anomaly Detection
-
-The SOC uses an Isolation Forest model to:
-
-* learn normal traffic behavior
-* detect suspicious traffic patterns
-* identify anomalous network flows
-
-This enables:
-
-* unknown attack detection
-* behavioral anomaly analysis
-* unsupervised threat discovery
-
----
-
-### 2. Intrusion Classification Model
-
-A supervised ML classifier predicts attack categories such as:
-
-* DDoS
-* Port Scan
-* Brute Force
-* Web Attacks
-* Infiltration
-* Botnet Activity
-
-Model pipeline:
+## System Architecture
 
 ```text
-Traffic Features
-        ↓
-ML Classifier
-        ↓
-Attack Type Prediction
+Attack Simulator
+      |
+      v
+Kafka: soc_logs
+      |
+      v
+Detection Agent
+      |
+      v
+Kafka: soc_alerts
+      |
+      +--> Investigation Agent
+      |          |
+      |          v
+      |   Kafka: investigated_alerts
+      |
+      +--> Threat Intel Agent
+      |          |
+      |          v
+      |   Kafka: threat_enriched_alerts
+      |
+      +--> Remediation Agent
+                 |
+                 v
+          Kafka: remediation_actions
+                 |
+                 +--> PostgreSQL
+                 +--> Redis pub/sub
+                 +--> FastAPI WebSocket
+                 +--> React Dashboard
 ```
 
----
+## Tech Stack
 
-### 3. AI-Driven Severity Prediction
+| Layer | Tools |
+| --- | --- |
+| Frontend | React, Vite, Tailwind CSS, Recharts, Framer Motion |
+| Backend | FastAPI, SQLAlchemy, WebSockets |
+| Streaming | Apache Kafka, Zookeeper |
+| Realtime | Redis pub/sub |
+| Database | PostgreSQL |
+| ML | scikit-learn, XGBoost, LightGBM, NumPy, Pandas |
+| DevOps | Docker, Docker Compose |
 
-Instead of static rules:
-
-```python
-if event == "DDoS":
-    severity = "HIGH"
-```
-
-the system uses:
-
-* anomaly scores
-* attack confidence
-* traffic patterns
-* behavioral indicators
-
-for contextual threat severity estimation.
-
----
-
-# Dataset
-
-The project uses the CICIDS2017 cybersecurity dataset.
-
-Dataset includes:
-
-* benign traffic
-* DDoS attacks
-* brute force attacks
-* port scans
-* infiltration attacks
-* botnet activity
-
-Dataset used for:
-
-* anomaly detection training
-* intrusion classification
-* evaluation pipelines
-* real-time inference testing
-
----
-
-# Machine Learning Pipeline
-
-## Data Processing
-
-* data cleaning
-* feature selection
-* handling missing values
-* scaling and normalization
-* train/test splitting
-
----
-
-## Evaluation Metrics
-
-The project evaluates:
-
-* accuracy
-* precision
-* recall
-* F1 score
-* false positive rate
-* anomaly detection rate
-* confusion matrices
-
-This ensures realistic cybersecurity model evaluation.
-
----
-
-# Project Structure
+## Repository Layout
 
 ```text
 ai-multi-agent-soc/
-│
-├── agents/
-│   ├── detection_agent.py
-│   ├── threat_intel_agent.py
-│   ├── remediation_agent.py
-│   └── reporting_agent.py
-│
-├── backend/
-│
-├── ml/
-│   ├── datasets/
-│   ├── models/
-│   ├── inference/
-│   └── training/
-│
-├── simulator/
-│
-├── docker-compose.yml
-│
+├── agents/                 # Detection, investigation, intel, remediation, reporting agents
+├── backend/                # FastAPI app, database models, alert routes, WebSocket stream
+├── frontend/               # React SOC dashboard
+├── kafka/                  # Kafka producer and consumer helpers
+├── ml/                     # Training and sequence detection workflows
+├── scripts/                # Attack simulator and operational scripts
+├── docker-compose.yml      # Full local infrastructure
+├── Dockerfile              # Backend and agent runtime image
 └── README.md
 ```
 
----
+## Quick Start
 
-# Tech Stack
-
-## Infrastructure
-
-* Python
-* Docker
-* FastAPI
-* PostgreSQL
-* Redis
-* Apache Kafka
-
----
-
-## AI / Machine Learning
-
-* Scikit-learn
-* Isolation Forest
-* Random Forest
-* XGBoost
-* Pandas
-* NumPy
-
----
-
-# Running the Project
-
-## 1. Clone Repository
+### 1. Clone and enter the repo
 
 ```bash
 git clone https://github.com/ImmanuelP31/ai-multi-agent-soc.git
 cd ai-multi-agent-soc
 ```
 
----
+### 2. Start the SOC infrastructure
 
-## 2. Create Virtual Environment
+```bash
+docker compose up -d --build
+```
+
+This starts PostgreSQL, Redis, Zookeeper, Kafka, the FastAPI backend, and all SOC agents.
+
+Check service status:
+
+```bash
+docker compose ps
+```
+
+### 3. Verify the backend
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/alerts/stats
+```
+
+Backend URL:
+
+```text
+http://127.0.0.1:8000
+```
+
+### 4. Run the frontend dashboard
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173
+```
+
+### 5. Generate simulated attacks
+
+From the repo root:
 
 ```bash
 python -m venv venv
-```
-
-Activate:
-
-### Windows
-
-```bash
-venv\Scripts\activate
-```
-
-### Linux/Mac
-
-```bash
 source venv/bin/activate
-```
-
----
-
-## 3. Install Dependencies
-
-```bash
 pip install -r requirements.txt
+python scripts/attack_simulator.py
 ```
 
----
+On Windows PowerShell:
 
-## 4. Start Infrastructure
+```powershell
+python -m venv venv
+.\venv\Scripts\activate
+pip install -r requirements.txt
+python scripts\attack_simulator.py
+```
+
+## Dashboard Features
+
+- Total alert, critical threat, and malware counters.
+- Severity distribution chart powered by backend analytics.
+- Live security alert table backed by PostgreSQL.
+- WebSocket-based threat feed powered by Redis pub/sub.
+- AI attack prediction panel for sequence-model outputs.
+- Responsive dark SOC interface built for quick analyst scanning.
+
+## API Surface
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /` | Backend status message |
+| `GET /health` | Backend and Redis health |
+| `GET /alerts/` | Recent persisted SOC alerts |
+| `GET /alerts/stats` | Dashboard counters and severity chart data |
+| `WS /ws/live-alerts` | Live threat feed stream |
+
+## Development Commands
+
+Run frontend checks:
 
 ```bash
-docker compose up -d
+cd frontend
+npm run lint
+npm run build
 ```
 
-Services:
-
-* Kafka
-* PostgreSQL
-* Redis
-* FastAPI backend
-
----
-
-## 5. Train ML Models
-
-### Train Anomaly Detection Model
+Run backend syntax checks:
 
 ```bash
-python ml/training/train_anomaly_model.py
+python -m py_compile backend/main.py backend/database.py backend/routes/alerts.py
 ```
 
-### Evaluate Anomaly Model
+Follow useful logs:
 
 ```bash
-python ml/training/evaluate_anomaly_model.py
+docker logs -f ai_soc_backend
+docker logs -f ai_soc_detection
+docker logs -f ai_soc_remediation
 ```
 
-### Train Intrusion Classifier
+Stop everything:
 
 ```bash
-python ml/training/train_intrusion_classifier.py
+docker compose down
 ```
 
----
+## What This Demonstrates
 
-## 6. Run Multi-Agent SOC System
+- Building an event-driven system with multiple independently running workers.
+- Designing a backend that serves both REST analytics and WebSocket updates.
+- Persisting and repairing evolving database schema safely during local development.
+- Connecting ML-driven detection outputs to a real-time analyst dashboard.
+- Packaging a complex system into a repeatable Docker Compose workflow.
+- Presenting technical work with a clean, recruiter-friendly frontend experience.
 
-Open separate terminals:
+## Author
 
-### Run Attack Simulator
-
-```bash
-python simulator/attack_simulator.py
-```
-
-### Run Detection Agent
-
-```bash
-python agents/detection_agent.py
-```
-
-### Run Threat Intelligence Agent
-
-```bash
-python agents/threat_intel_agent.py
-```
-
-### Run Remediation Agent
-
-```bash
-python agents/remediation_agent.py
-```
-
-### Run Reporting Agent
-
-```bash
-python agents/reporting_agent.py
-```
-
----
-
-# Example AI-Generated Alert
-
-```json
-{
-  "attack_type": "DDoS",
-  "confidence": 0.97,
-  "severity": "CRITICAL",
-  "anomaly_prediction": -1,
-  "source_ip": "192.168.1.25",
-  "timestamp": 1747269210
-}
-```
-
----
-
-# Current Capabilities
-
-* Real-time event streaming
-* Distributed agent communication
-* ML-powered anomaly detection
-* AI-based intrusion classification
-* Threat severity estimation
-* Kafka-driven SOC workflows
-* Dockerized deployment
-* Multi-agent orchestration
-
----
-
-# Future Improvements
-
-Planned enhancements:
-
-* LSTM-based sequence attack detection
-* Behavioral threat analysis
-* SIEM integrations
-* Live dashboard visualization
-* RAG-powered threat intelligence
-* Autonomous remediation workflows
-* Temporal transformer models
-* Advanced threat hunting pipelines
-
----
-
-# Why This Project Matters
-
-Traditional SOC systems rely heavily on:
-
-* static rules
-* manual triage
-* signature-based detection
-
-This project explores:
-
-```text
-AI-driven autonomous cybersecurity operations
-```
-
-where machine learning models actively participate in:
-
-* threat detection
-* attack classification
-* risk estimation
-* distributed response coordination
-
----
-
-# Author
-
-Immanuel P
-
-B.Tech Computer Science Engineering
-
-Focused on:
-
-* AI Engineering
-* Distributed Systems
-* Cybersecurity AI
-* Real-Time ML Systems
+**Immanuel P**  
+B.Tech Computer Science Engineering  
+Focused on AI engineering, distributed systems, and cybersecurity automation.
