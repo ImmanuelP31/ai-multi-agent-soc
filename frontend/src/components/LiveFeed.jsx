@@ -1,6 +1,15 @@
 import { useEffect, useState, useRef } from "react";
 
-const WS_URL = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8000/ws/live-alerts";
+// FIX 3: The original fallback hardcoded "ws://127.0.0.1:8000/ws/live-alerts".
+// Inside Docker the frontend container cannot reach 127.0.0.1:8000 (host loopback),
+// and even in dev this bypassed the Vite proxy.
+// Now we derive a relative WS URL from window.location so:
+//   - In Vite dev:   connects to the same host/port → Vite proxy forwards to backend.
+//   - In Docker:     connects to whatever host served the page → nginx/backend handles it.
+//   - VITE_WS_URL:   still respected if explicitly set in .env.
+const WS_URL =
+  import.meta.env.VITE_WS_URL ||
+  `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/live-alerts`;
 
 const SEVERITY_COLOR = {
   CRITICAL: "border-red-500 bg-red-950",
