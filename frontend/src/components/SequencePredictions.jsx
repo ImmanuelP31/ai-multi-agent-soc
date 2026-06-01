@@ -10,7 +10,11 @@ export default function SequencePredictions() {
       .get("/alerts/?limit=20")
       .then((res) => {
         const withPredictions = res.data
-          .filter((a) => a.predicted_next_attack && a.predicted_next_attack !== "BENIGN")
+          .filter(
+            (a) =>
+              (a.predicted_next_attack && a.predicted_next_attack !== "BENIGN") ||
+              a.investigation_method === "lstm_sequence_model_unavailable"
+          )
           .slice(0, 5);
         setPredictions(withPredictions);
         setLoading(false);
@@ -32,7 +36,7 @@ export default function SequencePredictions() {
       <h2 className="panel-title mb-4">
         AI Attack Predictions
         <span className="ml-2 text-xs font-normal text-slate-500">
-          (LSTM sequence model)
+          (LSTM when available)
         </span>
       </h2>
 
@@ -50,9 +54,20 @@ export default function SequencePredictions() {
             <div className="flex justify-between gap-4">
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-white">
-                  Predicted next:{" "}
-                  <span className="text-cyan-400">{alert.predicted_next_attack}</span>
+                  {alert.predicted_next_attack ? "Predicted next:" : "Prediction unavailable:"}{" "}
+                  <span className="text-cyan-400">
+                    {alert.predicted_next_attack || "trained model not loaded"}
+                  </span>
                 </p>
+                {alert.investigation_method && (
+                  <p className="mt-0.5 text-[11px] uppercase text-slate-500">
+                    {alert.investigation_method === "lstm_sequence_model"
+                      ? "LSTM sequence model"
+                      : `LSTM sequence model unavailable${
+                          alert.lstm_status ? ` - ${alert.lstm_status.replace(/_/g, " ")}` : ""
+                        }`}
+                  </p>
+                )}
                 <p className="mt-0.5 text-xs text-slate-400">
                   Triggered by:{" "}
                   <span className="text-yellow-400">{alert.event?.replace(/_/g, " ")}</span>

@@ -161,6 +161,28 @@ pip install -r requirements.txt
 python scripts\attack_simulator.py
 ```
 
+## LSTM Prediction Notes
+
+The LSTM model artifact is intentionally not committed because `.h5` and
+`.npy` files are ignored. If `ml/sequence_detection/sequence_model.h5` is
+missing, the investigation agent does not generate a fallback next-attack
+prediction. Alerts will show `investigation_method:
+lstm_sequence_model_unavailable`, `lstm_status: missing_model_file`, and an
+investigation message with the exact path where the model file is expected.
+
+To enable the real LSTM path:
+
+```bash
+python ml/sequence_detection/generate_rich_sequences.py
+python ml/sequence_detection/train_lstm_model.py
+docker compose up -d --build investigation-agent
+```
+
+When the model is loaded, new alerts will show
+`investigation_method: lstm_sequence_model`. If the model is unavailable, they
+will show `investigation_method: lstm_sequence_model_unavailable` and include
+`lstm_status`.
+
 ## Dashboard Features
 
 - Total alert, critical threat, and malware counters.
