@@ -12,22 +12,21 @@ Handles unknown attack types via keyword-based fuzzy matching
 instead of returning a blank "Unknown Technique".
 """
 
+from dataclasses import dataclass
 import json
 import sys
 from pathlib import Path
+from typing import Mapping, Sequence
 
 _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from backend.database import init_db, persist_event
 from common.events import (
     SOCEvent,
     StageName,
     ThreatIntelligenceMetadata,
-    deserialize_event,
 )
-from common.kafka import consume_forever, create_consumer, create_producer, publish_event
 
 # =========================================================
 # MITRE ATT&CK KNOWLEDGE BASE
@@ -197,67 +196,107 @@ UNKNOWN_TECHNIQUE = {
 }
 
 
-def lookup_mitre(event: str, predicted_attack: str | None = None) -> dict:
-    """
-    1. Exact match on event name
-    2. Exact match on predicted_attack from LSTM
-    3. Fuzzy keyword match on event name
-    4. Unknown fallback
-    """
-    # Exact match
-    if event in MITRE_KB:
-        return MITRE_KB[event]
+@dataclass(frozen=True)
+class MitreMatch:
+    technique: str
+    tactic: str
+    confidence: float
+    action: str
+    match_type: str
 
-    # Use LSTM prediction if available
-    if predicted_attack and predicted_attack in MITRE_KB:
-        entry = MITRE_KB[predicted_attack].copy()
-        entry["confidence"] = round(entry["confidence"] * 0.85, 2)  # slight penalty
-        entry["note"] = f"Mapped via LSTM-predicted attack: {predicted_attack}"
-        return entry
 
-    # Fuzzy keyword fallback
-    event_lower = event.lower()
-    for keyword, entry in FUZZY_KEYWORDS:
-        if keyword in event_lower:
-            result = entry.copy()
-            result["note"] = f"Fuzzy-matched on keyword '{keyword}' — confidence reduced."
-            return result
+class ThreatIntelProcessor:
+    """Map observed or predicted attacks to the existing MITRE knowledge base."""
 
-    return UNKNOWN_TECHNIQUE.copy()
+    def __init__(
+        self,
+        knowledge_base: Mapping[str, Mapping] = MITRE_KB,
+        fuzzy_keywords: Sequence[tuple[str, Mapping]] = FUZZY_KEYWORDS,
+    ) -> None:
+        self.knowledge_base = knowledge_base
+        self.fuzzy_keywords = fuzzy_keywords
+
+    @staticmethod
+    def _match(entry: Mapping, match_type: str, confidence: float | None = None):
+        return MitreMatch(
+            technique=str(entry["technique"]),
+            tactic=str(entry["tactic"]),
+            confidence=float(entry["confidence"] if confidence is None else confidence),
+            action=str(entry["action"]),
+            match_type=match_type,
+        )
+
+    def lookup(self, event: str, predicted_attack: str | None = None) -> MitreMatch:
+        if event in self.knowledge_base:
+            return self._match(self.knowledge_base[event], "exact_match")
+
+        if predicted_attack and predicted_attack in self.knowledge_base:
+            entry = self.knowledge_base[predicted_attack]
+            confidence = round(float(entry["confidence"]) * 0.85, 2)
+            return self._match(entry, "predicted_attack_match", confidence)
+
+        event_lower = event.lower()
+        for keyword, entry in self.fuzzy_keywords:
+            if keyword in event_lower:
+                return self._match(entry, "fuzzy_keyword_match")
+
+        return self._match(UNKNOWN_TECHNIQUE, "unknown")
+
+    def process(self, event: SOCEvent) -> SOCEvent:
+        intel = self.lookup(
+            event.event,
+            event.investigation_metadata.predicted_next_attack,
+        )
+        enriched = event.model_copy(deep=True)
+        enriched.threat_intelligence = ThreatIntelligenceMetadata(
+            mitre_attack=intel.technique,
+            mitre_tactic=intel.tactic,
+            confidence=intel.confidence,
+            recommended_action=intel.action,
+            method=intel.match_type,
+        )
+        return enriched.advance_stage(StageName.THREAT_INTEL, "threat-intel-agent")
+
+
+def lookup_mitre(event: str, predicted_attack: str | None = None) -> MitreMatch:
+    """Compatibility wrapper around the deterministic lookup processor."""
+
+    return ThreatIntelProcessor().lookup(event, predicted_attack)
 
 
 def process_event(event: SOCEvent) -> SOCEvent:
-    """Attach MITRE context while preserving canonical identity."""
+    """Compatibility wrapper for deterministic threat-intel processing."""
 
-    intel = lookup_mitre(
-        event.event,
-        event.investigation_metadata.predicted_next_attack,
-    )
-    enriched = event.model_copy(deep=True)
-    enriched.threat_intelligence = ThreatIntelligenceMetadata(
-        mitre_attack=intel["technique"],
-        mitre_tactic=intel["tactic"],
-        confidence=intel["confidence"],
-        recommended_action=intel["action"],
-        method=(
-            "exact_match"
-            if "note" not in intel
-            else intel.get("note", "fuzzy")
-        ),
-    )
-    return enriched.advance_stage(StageName.THREAT_INTEL, "threat-intel-agent")
+    return ThreatIntelProcessor().process(event)
 
 
 def main() -> None:
+    from backend.database import init_db, persist_event
+    from common.kafka import (
+        consume_forever,
+        create_consumer,
+        create_producer,
+        publish_event,
+    )
+    from common.pipeline import run_stage
+
+    processor = ThreatIntelProcessor()
     consumer = create_consumer("investigated_alerts", "soc-threat-intel")
     producer = create_producer()
     init_db()
     print("Threat Intelligence Agent Running...\n")
 
     def handle(payload: dict) -> None:
-        event = process_event(deserialize_event(payload))
-        persist_event(event)
-        publish_event(producer, "threat_enriched_alerts", event)
+        event = run_stage(
+            payload,
+            processor,
+            persist_event,
+            publish=lambda value: publish_event(
+                producer,
+                "threat_enriched_alerts",
+                value,
+            ),
+        )
         print(json.dumps(event.to_message(), default=str), flush=True)
 
     consume_forever(consumer, handle, "threat-intel-agent")

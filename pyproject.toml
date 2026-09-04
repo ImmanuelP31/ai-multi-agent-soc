@@ -1,0 +1,32 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: requires the Docker Compose SOC stack",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E402"]
+
+[tool.coverage.run]
+branch = true
+source = [
+    "agents",
+    "backend",
+    "common",
+    "ml.features",
+    "ml.sequence_detection.predictor",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 65
+exclude_lines = [
+    "if __name__ == .__main__.:",
+]

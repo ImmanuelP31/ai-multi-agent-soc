@@ -1,0 +1,4 @@
+-r requirements-min.txt
+pytest
+pytest-cov
+ruff

@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements-min.txt
+            requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: python -m compileall -q agents backend common ml scripts tests
+      - run: python -m pytest -m "not integration" --cov --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.xml
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        run: >-
+          docker compose -p ai-soc-step6 --env-file .env.test
+          -f docker-compose.yml -f docker-compose.test.yml config --quiet
+      - name: Start SOC pipeline
+        run: >-
+          docker compose -p ai-soc-step6 --env-file .env.test
+          -f docker-compose.yml -f docker-compose.test.yml up -d --build
+      - name: Run replay smoke test
+        run: >-
+          docker compose -p ai-soc-step6 --env-file .env.test
+          -f docker-compose.yml -f docker-compose.test.yml
+          --profile test run --rm integration-test
+      - name: Show service logs on failure
+        if: failure()
+        run: >-
+          docker compose -p ai-soc-step6 --env-file .env.test
+          -f docker-compose.yml -f docker-compose.test.yml logs --no-color
+      - name: Stop integration stack
+        if: always()
+        run: >-
+          docker compose -p ai-soc-step6 --env-file .env.test
+          -f docker-compose.yml -f docker-compose.test.yml down -v

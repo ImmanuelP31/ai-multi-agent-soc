@@ -229,7 +229,7 @@ To enable the real LSTM path:
 ```bash
 python ml/sequence_detection/generate_rich_sequences.py
 python ml/sequence_detection/train_lstm_model.py
-python ml/sequence_detection/test_lstm_model.py
+python scripts/evaluate_sequence_model.py
 docker compose up -d --build investigation-agent
 ```
 
@@ -307,7 +307,17 @@ python -m py_compile backend/main.py backend/database.py backend/routes/alerts.p
 Run pipeline unit tests:
 
 ```bash
-python -m unittest discover -s tests -v
+pip install -r requirements-dev.txt
+ruff check .
+python -m pytest -m "not integration" --cov
+```
+
+Run the replay smoke test in an isolated Docker Compose stack:
+
+```bash
+docker compose -p ai-soc-step6 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml up -d --build
+docker compose -p ai-soc-step6 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml --profile test run --rm integration-test
+docker compose -p ai-soc-step6 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml down -v
 ```
 
 Follow useful logs:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -12,9 +13,7 @@ _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from backend.database import init_db, persist_event
-from common.events import DetectionMetadata, SOCEvent, Severity, StageName, deserialize_event
-from common.kafka import consume_forever, create_consumer, create_producer, publish_event
+from common.events import DetectionMetadata, SOCEvent, Severity, StageName
 from ml.features.network_flow import (
     DEFAULT_BUNDLE_PATH,
     AnomalyModelBundle,
@@ -90,45 +89,81 @@ failed_login_counter: dict[str, int] = defaultdict(int)
 failed_login_results: dict[str, int] = {}
 
 
-def process_event(
-    event: SOCEvent,
-    *,
-    mode: str,
-    bundle: AnomalyModelBundle | None = None,
-) -> SOCEvent:
-    """Apply detection; ML inputs come only from telemetry.flow_features."""
+class DetectionProcessor:
+    """Apply one configured detection strategy without infrastructure access."""
 
-    normalized_mode = mode.strip().lower()
-    if normalized_mode == "ml":
-        if bundle is None:
+    def __init__(
+        self,
+        *,
+        mode: str,
+        bundle: AnomalyModelBundle | None = None,
+        login_counts: dict[str, int] | None = None,
+        login_results: dict[str, int] | None = None,
+    ) -> None:
+        self.mode = mode.strip().lower()
+        if self.mode not in {"ml", "rule_based"}:
+            raise ValueError(
+                f"Unsupported detection mode '{mode}'. Use 'ml' or 'rule_based'."
+            )
+        self.bundle = bundle
+        self.login_counts = (
+            login_counts if login_counts is not None else defaultdict(int)
+        )
+        self.login_results = login_results if login_results is not None else {}
+
+    def _run_ml(self, event: SOCEvent) -> tuple[str, DetectionMetadata]:
+        if self.bundle is None:
             raise ModelBundleError(
                 "ML detection is configured but no validated anomaly bundle is loaded"
             )
-        inference = bundle.infer(event.telemetry.flow_features)
-        severity = inference.severity
-        anomaly_score = round(inference.decision_score, 6)
-        detection = DetectionMetadata(
+        inference = self.bundle.infer(event.telemetry.flow_features)
+        score = inference.decision_score
+        if isinstance(score, bool):
+            raise ModelBundleError("Anomaly model returned a non-numeric decision score")
+        try:
+            score = float(score)
+        except (TypeError, ValueError) as exc:
+            raise ModelBundleError(
+                "Anomaly model returned a non-numeric decision score"
+            ) from exc
+        if not math.isfinite(score):
+            raise ModelBundleError("Anomaly model returned a non-finite decision score")
+        try:
+            severity = Severity(inference.severity)
+        except ValueError as exc:
+            raise ModelBundleError(
+                f"Anomaly model returned invalid severity: {inference.severity!r}"
+            ) from exc
+        if severity not in {Severity.LOW, Severity.MEDIUM, Severity.HIGH}:
+            raise ModelBundleError(
+                f"Anomaly model returned invalid severity: {inference.severity!r}"
+            )
+        if not isinstance(inference.is_anomaly, bool):
+            raise ModelBundleError("Anomaly model returned an invalid anomaly flag")
+
+        rounded_score = round(score, 6)
+        return severity.value, DetectionMetadata(
             method="isolation_forest",
-            anomaly_score=anomaly_score,
-            decision_score=anomaly_score,
+            anomaly_score=rounded_score,
+            decision_score=rounded_score,
             model_available=True,
             model_status="loaded",
-            model_version=bundle.metadata.model_version,
-            feature_pipeline_version=bundle.metadata.feature_pipeline_version,
-            threshold_version=bundle.thresholds.version,
-            threshold_basis=bundle.thresholds.basis,
+            model_version=self.bundle.metadata.model_version,
+            feature_pipeline_version=self.bundle.metadata.feature_pipeline_version,
+            threshold_version=self.bundle.thresholds.version,
+            threshold_basis=self.bundle.thresholds.basis,
             thresholds={
                 "anomaly_decision_threshold": (
-                    bundle.thresholds.anomaly_decision_threshold
+                    self.bundle.thresholds.anomaly_decision_threshold
                 ),
                 "high_severity_decision_threshold": (
-                    bundle.thresholds.high_severity_decision_threshold
+                    self.bundle.thresholds.high_severity_decision_threshold
                 ),
             },
         )
-    elif normalized_mode == "rule_based":
-        severity = fallback_severity(event)
-        detection = DetectionMetadata(
+
+    def _run_rules(self, event: SOCEvent) -> tuple[str, DetectionMetadata]:
+        return fallback_severity(event), DetectionMetadata(
             method="rule_based_fallback",
             anomaly_score=None,
             decision_score=None,
@@ -140,30 +175,57 @@ def process_event(
             threshold_basis=FALLBACK_RULE_BASIS,
             thresholds=FALLBACK_THRESHOLDS,
         )
-    else:
-        raise ValueError(
-            f"Unsupported detection mode '{mode}'. Use 'ml' or 'rule_based'."
-        )
 
-    failed_login_count = None
-    if event.event == "failed_login" and event.source_ip:
-        identity = str(event.event_id)
-        if identity not in failed_login_results:
-            failed_login_counter[event.source_ip] += 1
-            failed_login_results[identity] = failed_login_counter[event.source_ip]
-        failed_login_count = failed_login_results[identity]
-        if failed_login_count > 5:
-            severity = "HIGH"
-        detection.failed_login_count = failed_login_count
+    def process(self, event: SOCEvent) -> SOCEvent:
+        if self.mode == "ml":
+            severity, detection = self._run_ml(event)
+        else:
+            severity, detection = self._run_rules(event)
 
-    enriched = event.model_copy(deep=True)
-    enriched.severity = Severity(severity)
-    enriched.detection = detection
-    enriched.telemetry.failed_login_count = failed_login_count
-    return enriched.advance_stage(StageName.DETECTION, "detection-agent")
+        failed_login_count = None
+        if event.event == "failed_login" and event.source_ip:
+            identity = str(event.event_id)
+            if identity not in self.login_results:
+                self.login_counts[event.source_ip] += 1
+                self.login_results[identity] = self.login_counts[event.source_ip]
+            failed_login_count = self.login_results[identity]
+            if failed_login_count > 5:
+                severity = Severity.HIGH.value
+            detection.failed_login_count = failed_login_count
+
+        enriched = event.model_copy(deep=True)
+        enriched.severity = Severity(severity)
+        enriched.detection = detection
+        enriched.telemetry.failed_login_count = failed_login_count
+        return enriched.advance_stage(StageName.DETECTION, "detection-agent")
+
+
+def process_event(
+    event: SOCEvent,
+    *,
+    mode: str,
+    bundle: AnomalyModelBundle | None = None,
+) -> SOCEvent:
+    """Compatibility wrapper for deterministic detection processing."""
+
+    return DetectionProcessor(
+        mode=mode,
+        bundle=bundle,
+        login_counts=failed_login_counter,
+        login_results=failed_login_results,
+    ).process(event)
 
 
 def main() -> None:
+    from backend.database import init_db, persist_event
+    from common.kafka import (
+        consume_forever,
+        create_consumer,
+        create_producer,
+        publish_event,
+    )
+    from common.pipeline import run_stage
+
     try:
         bundle = load_detection_runtime()
     except (ModelBundleError, ValueError) as exc:
@@ -180,18 +242,18 @@ def main() -> None:
             f"from {ANOMALY_BUNDLE_PATH}\n"
         )
 
+    processor = DetectionProcessor(mode=DETECTION_MODE, bundle=bundle)
     consumer = create_consumer("soc_logs", "soc-detection")
     producer = create_producer()
     init_db()
 
     def handle(payload: dict) -> None:
-        event = process_event(
-            deserialize_event(payload),
-            mode=DETECTION_MODE,
-            bundle=bundle,
+        event = run_stage(
+            payload,
+            processor,
+            persist_event,
+            publish=lambda value: publish_event(producer, "soc_alerts", value),
         )
-        persist_event(event)
-        publish_event(producer, "soc_alerts", event)
         print(json.dumps(event.to_message(), default=str), flush=True)
 
     consume_forever(consumer, handle, "detection-agent")

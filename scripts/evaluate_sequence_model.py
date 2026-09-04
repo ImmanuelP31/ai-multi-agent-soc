@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import sys
 
-_repo_root = Path(__file__).resolve().parents[2]
+_repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
@@ -19,24 +19,24 @@ from ml.sequence_detection.pipeline import (
 )
 
 
-THIS_DIR = Path(__file__).resolve().parent
+ARTIFACT_DIR = _repo_root / "ml" / "sequence_detection"
 
 
 def main() -> None:
-    with open(THIS_DIR / "metadata.json", encoding="utf-8") as file:
+    with open(ARTIFACT_DIR / "metadata.json", encoding="utf-8") as file:
         metadata = json.load(file)
-    with open(THIS_DIR / "label_mapping.json", encoding="utf-8") as file:
+    with open(ARTIFACT_DIR / "label_mapping.json", encoding="utf-8") as file:
         label_mapping = json.load(file)
     validate_metadata(metadata, label_mapping)
-    load_preprocessor(THIS_DIR / "sequence_preprocessor.joblib")
-    arrays = load_dataset_artifact(THIS_DIR / "sequence_dataset.npz")
+    load_preprocessor(ARTIFACT_DIR / "sequence_preprocessor.joblib")
+    arrays = load_dataset_artifact(ARTIFACT_DIR / "sequence_dataset.npz")
 
     try:
         from tensorflow.keras.models import load_model
     except ImportError as exc:
         raise RuntimeError("TensorFlow is required to evaluate the LSTM") from exc
 
-    model_path = THIS_DIR / str(metadata["model_artifact"])
+    model_path = ARTIFACT_DIR / str(metadata["model_artifact"])
     if not model_path.is_file() or metadata.get("status") != "trained":
         raise FileNotFoundError(
             f"A trained compatible model is required at {model_path}. "

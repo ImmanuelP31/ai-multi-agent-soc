@@ -18,35 +18,35 @@ invoke real firewall APIs (e.g. AWS WAF, iptables, Palo Alto PAN-OS).
 The simulation layer makes the intent clear while keeping the code testable.
 """
 
+import ipaddress
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from backend.database import init_db, persist_event
 from common.events import (
     RemediationAction,
     RemediationMetadata,
     SOCEvent,
     StageName,
-    deserialize_event,
 )
-from common.kafka import consume_forever, create_consumer, create_producer, publish_event
 
 # =========================================================
 # REMEDIATION LOG FILE
 # =========================================================
 
 LOG_DIR  = _repo_root / "logs"
-LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "remediation_actions.jsonl"   # one JSON object per line
 
 
 def write_remediation_log(record: dict) -> None:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     event_id = record.get("event_id")
     if event_id and LOG_FILE.exists():
         with open(LOG_FILE) as existing:
@@ -142,53 +142,108 @@ def _audit_log(event: str, ip: str) -> dict:
 # TIERED RESPONSE ENGINE
 # =========================================================
 
+def _validated_ip(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return None
+
+
+def _validated_user(value: str | None) -> str | None:
+    if value and re.fullmatch(r"[A-Za-z0-9_.@-]{1,255}", value):
+        return value
+    return None
+
+
+def _manual_review(target: str | None, target_type: str) -> dict:
+    return {
+        "action": "MANUAL_REMEDIATION_REQUIRED",
+        "target": target,
+        "status": "skipped",
+        "note": f"No command generated because {target_type} is missing or invalid.",
+    }
+
+
+class RemediationProcessor:
+    """Build safe simulated actions without performing infrastructure I/O."""
+
+    def __init__(
+        self,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def determine_actions(self, event: SOCEvent) -> list[dict]:
+        severity = event.severity.value
+        valid_ip = _validated_ip(event.source_ip)
+        valid_user = _validated_user(event.user)
+        display_target = valid_ip or event.source_ip or "unknown"
+        actions: list[dict] = []
+
+        if severity == "CRITICAL":
+            actions.append(
+                _block_ip(valid_ip)
+                if valid_ip
+                else _manual_review(event.source_ip, "source IP")
+            )
+            if valid_user:
+                actions.append(_isolate_user(valid_user))
+            elif event.user:
+                actions.append(_manual_review(event.user, "user identity"))
+            actions.append(
+                {
+                    "action": "ESCALATE_TO_ANALYST",
+                    "target": display_target,
+                    "status": "triggered",
+                    "note": (
+                        f"CRITICAL alert for '{event.event}' - paging on-call analyst."
+                    ),
+                }
+            )
+        elif severity == "HIGH":
+            actions.append(
+                _block_ip(valid_ip)
+                if valid_ip
+                else _manual_review(event.source_ip, "source IP")
+            )
+            if valid_user:
+                actions.append(_flag_user(valid_user))
+            elif event.user:
+                actions.append(_manual_review(event.user, "user identity"))
+        elif severity == "MEDIUM":
+            if valid_ip:
+                actions.extend(
+                    [_rate_limit_ip(valid_ip), _increase_monitoring(valid_ip)]
+                )
+            else:
+                actions.append(_manual_review(event.source_ip, "source IP"))
+        else:
+            actions.append(_audit_log(event.event, display_target))
+
+        return actions
+
+    def process(self, event: SOCEvent) -> SOCEvent:
+        actions = self.determine_actions(event)
+        enriched = event.model_copy(deep=True)
+        enriched.remediation = RemediationMetadata(
+            actions=[RemediationAction.model_validate(action) for action in actions],
+            remediated_at=self.clock(),
+        )
+        return enriched.advance_stage(StageName.REMEDIATION, "remediation-agent")
+
+
 def determine_actions(event: SOCEvent) -> list[dict]:
-    """
-    Return a list of remediation actions based on severity,
-    recommended_action from threat intel, and available fields.
-    """
-    severity = event.severity.value
-    ip       = event.source_ip or "unknown"
-    user     = event.user or "unknown"
-    event_name = event.event
-    actions  = []
+    """Compatibility wrapper around the remediation processor."""
 
-    if severity == "CRITICAL":
-        actions.append(_block_ip(ip))
-        if user != "unknown":
-            actions.append(_isolate_user(user))
-        actions.append({
-            "action": "ESCALATE_TO_ANALYST",
-            "target": ip,
-            "status": "triggered",
-            "note":   f"CRITICAL alert for '{event_name}' — paging on-call analyst.",
-        })
-
-    elif severity == "HIGH":
-        actions.append(_block_ip(ip))
-        if user != "unknown":
-            actions.append(_flag_user(user))
-
-    elif severity == "MEDIUM":
-        actions.append(_rate_limit_ip(ip))
-        actions.append(_increase_monitoring(ip))
-
-    else:  # LOW
-        actions.append(_audit_log(event_name, ip))
-
-    return actions
+    return RemediationProcessor().determine_actions(event)
 
 
 def process_event(event: SOCEvent) -> SOCEvent:
-    """Attach simulated response actions while preserving identity."""
+    """Compatibility wrapper for deterministic remediation processing."""
 
-    actions = determine_actions(event)
-    enriched = event.model_copy(deep=True)
-    enriched.remediation = RemediationMetadata(
-        actions=[RemediationAction.model_validate(action) for action in actions],
-        remediated_at=datetime.now(timezone.utc),
-    )
-    return enriched.advance_stage(StageName.REMEDIATION, "remediation-agent")
+    return RemediationProcessor().process(event)
 
 
 def remediation_log_record(event: SOCEvent) -> dict:
@@ -232,16 +287,35 @@ def print_actions(event: SOCEvent) -> None:
 
 
 def main() -> None:
+    from backend.database import init_db, persist_event
+    from common.kafka import (
+        consume_forever,
+        create_consumer,
+        create_producer,
+        publish_event,
+    )
+    from common.pipeline import run_stage
+
+    processor = RemediationProcessor()
     consumer = create_consumer("threat_enriched_alerts", "soc-remediation")
     producer = create_producer()
     init_db()
     print("Remediation Agent Running...\n")
 
     def handle(payload: dict) -> None:
-        event = process_event(deserialize_event(payload))
-        persist_event(event)
-        write_remediation_log(remediation_log_record(event))
-        publish_event(producer, "remediation_actions", event)
+        event = run_stage(
+            payload,
+            processor,
+            persist_event,
+            after_persist=lambda value: write_remediation_log(
+                remediation_log_record(value)
+            ),
+            publish=lambda value: publish_event(
+                producer,
+                "remediation_actions",
+                value,
+            ),
+        )
         print_actions(event)
 
     consume_forever(consumer, handle, "remediation-agent")

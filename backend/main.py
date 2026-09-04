@@ -211,7 +211,7 @@ async def websocket_endpoint(websocket: WebSocket):
         try:
             pubsub.unsubscribe(REDIS_CHANNEL)
             pubsub.close()
-        except:
+        except Exception:
             pass
 
 # =========================================================

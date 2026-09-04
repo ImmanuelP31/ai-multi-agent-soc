@@ -9,9 +9,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from kafka import KafkaConsumer, KafkaProducer
-from kafka.structs import OffsetAndMetadata, TopicPartition
-
 from common.events import SOCEvent
 
 
@@ -20,17 +17,20 @@ def bootstrap_servers() -> str:
 
 
 def create_consumer(topic: str, group_id: str, *, offset_reset: str = "earliest"):
+    from kafka import KafkaConsumer
+
     return KafkaConsumer(
         topic,
         bootstrap_servers=bootstrap_servers(),
         group_id=group_id,
         enable_auto_commit=False,
         auto_offset_reset=offset_reset,
-        value_deserializer=lambda value: json.loads(value.decode("utf-8")),
     )
 
 
 def create_producer():
+    from kafka import KafkaProducer
+
     return KafkaProducer(
         bootstrap_servers=bootstrap_servers(),
         acks="all",
@@ -44,12 +44,23 @@ def publish_event(producer, topic: str, event: SOCEvent) -> None:
 
 
 def commit_message(consumer, message) -> None:
+    from kafka.structs import OffsetAndMetadata, TopicPartition
+
     partition = TopicPartition(message.topic, message.partition)
     offset = OffsetAndMetadata(message.offset + 1, "", -1)
     consumer.commit({partition: offset})
 
 
-def retry_message(consumer, message, agent_name: str, exc: Exception) -> None:
+def retry_message(
+    consumer,
+    message,
+    agent_name: str,
+    exc: Exception,
+    *,
+    retry_delay: float = 1.0,
+) -> None:
+    from kafka.structs import TopicPartition
+
     partition = TopicPartition(message.topic, message.partition)
     event_id = None
     if isinstance(message.value, dict):
@@ -70,7 +81,55 @@ def retry_message(consumer, message, agent_name: str, exc: Exception) -> None:
         flush=True,
     )
     consumer.seek(partition, message.offset)
-    time.sleep(1)
+    if retry_delay > 0:
+        time.sleep(retry_delay)
+
+
+def decode_message_value(value: Any) -> dict[str, Any]:
+    """Decode one Kafka value so malformed payloads stay uncommitted."""
+
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Kafka message is not valid UTF-8") from exc
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Kafka message is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("Kafka message must contain a JSON object")
+    return value
+
+
+def process_message(
+    consumer,
+    message,
+    handler: Callable[[dict[str, Any]], None],
+    agent_name: str,
+    *,
+    retry_delay: float = 1.0,
+    commit_fn: Callable[[Any, Any], None] | None = None,
+    retry_fn: Callable[..., None] | None = None,
+) -> bool:
+    """Process and acknowledge one message, returning whether it committed."""
+
+    try:
+        handler(decode_message_value(message.value))
+        (commit_fn or commit_message)(consumer, message)
+        return True
+    except Exception as exc:
+        (retry_fn or retry_message)(
+            consumer,
+            message,
+            agent_name,
+            exc,
+            retry_delay=retry_delay,
+        )
+        return False
 
 
 def consume_forever(
@@ -79,8 +138,4 @@ def consume_forever(
     agent_name: str,
 ) -> None:
     for message in consumer:
-        try:
-            handler(message.value)
-            commit_message(consumer, message)
-        except Exception as exc:
-            retry_message(consumer, message, agent_name, exc)
+        process_message(consumer, message, handler, agent_name)

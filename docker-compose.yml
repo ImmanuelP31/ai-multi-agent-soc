@@ -6,14 +6,14 @@ services:
 
   postgres:
     image: postgres:15
-    container_name: ai_soc_postgres
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_postgres
     restart: always
     environment:
       POSTGRES_USER: socuser
       POSTGRES_PASSWORD: socpass
       POSTGRES_DB: socdb
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,10 +24,10 @@ services:
 
   redis:
     image: redis:7
-    container_name: ai_soc_redis
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_redis
     restart: always
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -48,14 +48,14 @@ services:
 
   zookeeper:
     image: bitnamilegacy/zookeeper:3.9.3-debian-12-r22
-    container_name: ai_soc_zookeeper
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_zookeeper
     environment:
       ALLOW_ANONYMOUS_LOGIN: "yes"
       # Enable ruok so the healthcheck below works.
       # ZooKeeper 3.5+ disables it by default; this re-enables it.
       ZOO_4LW_COMMANDS_WHITELIST: "mntr,srvr,ruok"
     ports:
-      - "2181:2181"
+      - "${ZOOKEEPER_PORT:-2181}:2181"
     healthcheck:
       test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
       interval: 10s
@@ -64,16 +64,16 @@ services:
 
   kafka:
     image: bitnamilegacy/kafka:3.7.1-debian-12-r9
-    container_name: ai_soc_kafka
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_kafka
     hostname: kafka
     ports:
-      - "9094:9094"
+      - "${KAFKA_EXTERNAL_PORT:-9094}:9094"
     environment:
       KAFKA_BROKER_ID: "1"
       KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
       ALLOW_PLAINTEXT_LISTENER: "yes"
       KAFKA_CFG_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094
-      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT:-9094}
       KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
       # ── Pre-create all topics the agent pipeline needs ──────────────────────
@@ -91,7 +91,7 @@ services:
   # ── Create topics explicitly so agents don't race at startup ────────────────
   kafka-init:
     image: bitnamilegacy/kafka:3.7.1-debian-12-r9
-    container_name: ai_soc_kafka_init
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_kafka_init
     depends_on:
       kafka:
         condition: service_healthy
@@ -114,9 +114,9 @@ services:
 
   backend:
     build: .
-    container_name: ai_soc_backend
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_backend
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -140,7 +140,7 @@ services:
 
   detection-agent:
     build: .
-    container_name: ai_soc_detection
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_detection
     command: ["python", "agents/detection_agent.py"]
     depends_on:
       kafka-init:
@@ -158,7 +158,7 @@ services:
 
   investigation-agent:
     build: .
-    container_name: ai_soc_investigation
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_investigation
     command: ["python", "agents/investigation_agent.py"]
     depends_on:
       kafka-init:
@@ -179,7 +179,7 @@ services:
 
   threat-intel-agent:
     build: .
-    container_name: ai_soc_threat_intel
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_threat_intel
     command: ["python", "agents/threat_intel_agent.py"]
     depends_on:
       kafka-init:
@@ -195,7 +195,7 @@ services:
 
   remediation-agent:
     build: .
-    container_name: ai_soc_remediation
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_remediation
     command: ["python", "agents/remediation_agent.py"]
     depends_on:
       kafka-init:
@@ -211,7 +211,7 @@ services:
 
   reporting-agent:
     build: .
-    container_name: ai_soc_reporting
+    container_name: ${SOC_CONTAINER_PREFIX:-ai_soc}_reporting
     command: ["python", "agents/reporting_agent.py"]
     depends_on:
       kafka-init:

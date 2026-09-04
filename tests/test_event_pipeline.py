@@ -38,6 +38,7 @@ class CanonicalEventTests(unittest.TestCase):
         restored = deserialize_event(event.to_message())
 
         self.assertEqual(restored, event)
+        self.assertEqual(restored.schema_version, event.schema_version)
         self.assertEqual(restored.kafka_key(), b"192.168.1.10")
 
     def test_kafka_key_falls_back_to_incident_id(self):

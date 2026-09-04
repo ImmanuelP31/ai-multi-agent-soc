@@ -1,0 +1,41 @@
+services:
+  detection-agent:
+    environment:
+      DETECTION_MODE: rule_based
+
+  remediation-agent:
+    volumes:
+      - test_logs:/app/logs
+
+  reporting-agent:
+    volumes:
+      - test_logs:/app/logs
+
+  integration-test:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    depends_on:
+      detection-agent:
+        condition: service_started
+      investigation-agent:
+        condition: service_started
+      threat-intel-agent:
+        condition: service_started
+      remediation-agent:
+        condition: service_started
+      reporting-agent:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://socuser:socpass@postgres:5432/socdb
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      PIPELINE_TIMEOUT_SECONDS: "60"
+      RUN_INTEGRATION: "1"
+    volumes:
+      - .:/app
+      - test_logs:/app/logs
+    command: ["python", "-m", "pytest", "-m", "integration", "tests/integration", "-v"]
+
+volumes:
+  test_logs:
