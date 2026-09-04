@@ -174,6 +174,34 @@ pip install -r requirements.txt
 python scripts\attack_simulator.py
 ```
 
+## Anomaly Detection Bundle
+
+The Isolation Forest uses one shared feature pipeline in
+`ml/features/network_flow.py`. Training and runtime inference use the same ten
+ordered network-flow fields, fitted median imputer, and fitted scaler. The
+detector reads only numeric `telemetry.flow_features`; simulator attack labels
+remain under `ground_truth` and are never model inputs.
+
+Train and evaluate the complete bundle:
+
+```bash
+docker compose build detection-agent
+docker compose run --rm --no-deps detection-agent python ml/training/train_anomaly_model.py
+docker compose run --rm --no-deps detection-agent python ml/training/evaluate_anomaly_model.py
+docker compose up -d detection-agent
+```
+
+Training writes `ml/models/anomaly_bundle.joblib`, containing the model,
+imputer, scaler, feature order, version metadata, and decision-function
+thresholds. Evaluation writes `ml/models/anomaly_evaluation.json` with
+precision, recall, F1, confusion matrix, false-positive rate, false-negative
+rate, and detection rate.
+
+Compose configures `DETECTION_MODE=ml`, which fails clearly when the bundle is
+missing or incompatible. An explicit telemetry-only fallback can be selected
+with `DETECTION_MODE=rule_based`; alerts then report
+`detection_method: rule_based_fallback` and `model_status: explicit_fallback`.
+
 ## LSTM Prediction Notes
 
 The LSTM model artifact is intentionally not committed because `.h5` and

@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
-from sklearn.impute import SimpleImputer
 
 files = [
     "ml/datasets/Monday-WorkingHours.pcap_ISCX.csv",
@@ -33,15 +32,10 @@ df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
 df.dropna(subset=["Label"], inplace=True)
 
-numeric_cols = df.select_dtypes(include=[np.number]).columns
-
-imputer = SimpleImputer(strategy="median")
-df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
-
 encoder = LabelEncoder()
 df["Label"] = encoder.fit_transform(df["Label"])
 
-print("\nPreprocessing completed")
+print("\nPreprocessing completed (missing numeric values retained for train-only fitting)")
 print(df.head())
 
 df.to_parquet("ml/datasets/processed_dataset.parquet")

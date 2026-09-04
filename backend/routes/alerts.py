@@ -41,6 +41,16 @@ def get_alerts(limit: int = 100, skip: int = 0):
                 "source_ip": r.source_ip or r.ip,
                 "ip": r.source_ip or r.ip,
                 "user": r.user,
+                "detection": r.detection_metadata,
+                "detection_method": (
+                    (r.detection_metadata or {}).get("method")
+                ),
+                "anomaly_score": (
+                    (r.detection_metadata or {}).get("anomaly_score")
+                ),
+                "detection_model_status": (
+                    (r.detection_metadata or {}).get("model_status")
+                ),
                 "investigation": r.investigation,
                 "investigation_method": r.investigation_method,
                 "mitre_attack": r.mitre_attack,

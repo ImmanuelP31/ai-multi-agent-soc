@@ -60,23 +60,20 @@ class CanonicalEventTests(unittest.TestCase):
 
 class PipelineIdentityTests(unittest.TestCase):
     def setUp(self):
-        self.old_detection_model_status = detection_agent.MODEL_AVAILABLE
         self.old_investigation_model_status = investigation_agent.MODEL_AVAILABLE
-        detection_agent.MODEL_AVAILABLE = False
         investigation_agent.MODEL_AVAILABLE = False
         detection_agent.failed_login_counter.clear()
         detection_agent.failed_login_results.clear()
         investigation_agent.ip_windows.clear()
 
     def tearDown(self):
-        detection_agent.MODEL_AVAILABLE = self.old_detection_model_status
         investigation_agent.MODEL_AVAILABLE = self.old_investigation_model_status
 
     def test_identity_survives_every_processing_stage(self):
         original = sample_event()
         identities = (original.event_id, original.incident_id)
 
-        detected = detection_agent.process_event(original)
+        detected = detection_agent.process_event(original, mode="rule_based")
         detected = deserialize_event(detected.to_message())
         investigated = investigation_agent.process_event(detected)
         investigated = deserialize_event(investigated.to_message())
@@ -131,9 +128,7 @@ class PipelineIdentityTests(unittest.TestCase):
 
 class IdempotentPersistenceTests(unittest.TestCase):
     def setUp(self):
-        self.old_detection_model_status = detection_agent.MODEL_AVAILABLE
         self.old_investigation_model_status = investigation_agent.MODEL_AVAILABLE
-        detection_agent.MODEL_AVAILABLE = False
         investigation_agent.MODEL_AVAILABLE = False
         investigation_agent.ip_windows.clear()
         self.old_engine = database._engine
@@ -155,12 +150,11 @@ class IdempotentPersistenceTests(unittest.TestCase):
         self.engine.dispose()
         database._engine = self.old_engine
         database.SessionLocal = self.old_session_local
-        detection_agent.MODEL_AVAILABLE = self.old_detection_model_status
         investigation_agent.MODEL_AVAILABLE = self.old_investigation_model_status
 
     def test_duplicate_delivery_updates_one_incident_row(self):
         event = sample_event()
-        detected = detection_agent.process_event(event)
+        detected = detection_agent.process_event(event, mode="rule_based")
 
         first_id = database.persist_event(detected)
         second_id = database.persist_event(detected)
@@ -182,7 +176,7 @@ class IdempotentPersistenceTests(unittest.TestCase):
 
     def test_replayed_earlier_stage_does_not_erase_later_enrichment(self):
         event = sample_event()
-        detected = detection_agent.process_event(event)
+        detected = detection_agent.process_event(event, mode="rule_based")
         investigated = investigation_agent.process_event(detected)
         database.persist_event(investigated)
 

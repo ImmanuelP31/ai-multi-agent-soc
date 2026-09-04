@@ -51,7 +51,14 @@ class TelemetryPayload(ContractModel):
 class DetectionMetadata(ContractModel):
     method: str | None = None
     anomaly_score: float | None = None
+    decision_score: float | None = None
     model_available: bool | None = None
+    model_status: str | None = None
+    model_version: str | None = None
+    feature_pipeline_version: str | None = None
+    threshold_version: str | None = None
+    threshold_basis: str | None = None
+    thresholds: dict[str, float] = Field(default_factory=dict)
     failed_login_count: int | None = None
 
 

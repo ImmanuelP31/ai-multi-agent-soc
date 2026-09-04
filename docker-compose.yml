@@ -141,6 +141,8 @@ services:
     environment:
       DATABASE_URL: postgresql://socuser:socpass@postgres:5432/socdb
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DETECTION_MODE: ml
+      ANOMALY_MODEL_BUNDLE: /app/ml/models/anomaly_bundle.joblib
     restart: on-failure
 
   investigation-agent:

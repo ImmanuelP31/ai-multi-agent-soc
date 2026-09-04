@@ -1,115 +1,53 @@
+"""Train and save the complete Isolation Forest inference bundle."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
 import pandas as pd
-import numpy as np
-import joblib
 
-from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import StandardScaler
+_repo_root = Path(__file__).resolve().parents[2]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
-# ==========================================
-# LOAD TRAINING DATASET
-# ==========================================
-
-print("Loading training dataset...")
-
-df = pd.read_parquet("ml/datasets/train_dataset.parquet")
-
-# ==========================================
-# TRAIN ONLY ON BENIGN TRAFFIC
-# ==========================================
-
-print("\nFiltering BENIGN traffic only...")
-
-df = df[df["Label"] == 0]
-
-print("Filtered dataset shape:", df.shape)
-
-print("Dataset loaded successfully")
-
-# ==========================================
-# CLEAN COLUMN NAMES
-# ==========================================
-
-df.columns = df.columns.str.strip()
-
-# ==========================================
-# REMOVE INVALID VALUES
-# ==========================================
-
-df.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-# ==========================================
-# SELECT IMPORTANT FEATURES
-# ==========================================
-
-features = [
-    "Flow Duration",
-    "Total Fwd Packets",
-    "Total Backward Packets",
-    "Flow Bytes/s",
-    "Flow Packets/s",
-    "Fwd Packet Length Mean",
-    "Bwd Packet Length Mean",
-    "SYN Flag Count",
-    "ACK Flag Count",
-    "Average Packet Size"
-]
-
-# Keep only selected columns
-X = df[features]
-
-# ==========================================
-# HANDLE MISSING VALUES
-# ==========================================
-
-X = X.fillna(X.median())
-
-# ==========================================
-# FEATURE SCALING
-# ==========================================
-
-print("\nScaling features...")
-
-scaler = StandardScaler()
-
-X_scaled = scaler.fit_transform(X)
-
-# ==========================================
-# TRAIN ISOLATION FOREST
-# ==========================================
-
-print("\nTraining Isolation Forest model...")
-
-model = IsolationForest(
-    n_estimators=100,
-    contamination=0.02,
-    random_state=42,
-    n_jobs=-1,
-    verbose=1
+from ml.features.network_flow import (
+    DEFAULT_BUNDLE_PATH,
+    fit_anomaly_bundle,
+    save_anomaly_bundle,
 )
 
-model.fit(X_scaled)
 
-# ==========================================
-# SAVE MODEL
-# ==========================================
+TRAIN_DATASET = _repo_root / "ml" / "datasets" / "train_dataset.parquet"
 
-print("\nSaving model...")
 
-joblib.dump(
-    model,
-    "ml/models/anomaly_model.pkl"
-)
+def train_anomaly_model(
+    dataset_path: Path = TRAIN_DATASET,
+    bundle_path: Path = DEFAULT_BUNDLE_PATH,
+):
+    print(f"Loading training dataset: {dataset_path}")
+    dataframe = pd.read_parquet(dataset_path)
+    dataframe.columns = dataframe.columns.str.strip()
+    if "Label" not in dataframe:
+        raise ValueError("Training dataset is missing the Label column")
 
-joblib.dump(
-    scaler,
-    "ml/models/anomaly_scaler.pkl"
-)
+    benign = dataframe[dataframe["Label"] == 0].copy()
+    if benign.empty:
+        raise ValueError("Training split contains no benign rows (Label == 0)")
+    print(f"Fitting preprocessing and Isolation Forest on {len(benign)} benign rows")
 
-joblib.dump(
-    features,
-    "ml/models/anomaly_features.pkl"
-)
+    bundle = fit_anomaly_bundle(benign)
+    saved_path = save_anomaly_bundle(bundle, bundle_path)
+    print(f"Saved complete anomaly bundle: {saved_path}")
+    print(f"Features: {list(bundle.feature_names)}")
+    print(
+        "Decision thresholds: "
+        f"anomaly={bundle.thresholds.anomaly_decision_threshold:.6f}, "
+        f"high={bundle.thresholds.high_severity_decision_threshold:.6f}"
+    )
+    print(bundle.thresholds.basis)
+    return bundle
 
-print("\n===================================")
-print("Anomaly model trained successfully")
-print("===================================")
+
+if __name__ == "__main__":
+    train_anomaly_model()

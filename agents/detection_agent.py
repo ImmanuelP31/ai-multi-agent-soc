@@ -1,14 +1,12 @@
-"""Detect anomalous SOC events and publish canonical alerts."""
+"""Detect anomalies from canonical numeric network-flow telemetry."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 import json
+import os
 from pathlib import Path
 import sys
-
-import joblib
-import numpy as np
 
 _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
@@ -17,72 +15,73 @@ if str(_repo_root) not in sys.path:
 from backend.database import init_db, persist_event
 from common.events import DetectionMetadata, SOCEvent, Severity, StageName, deserialize_event
 from common.kafka import consume_forever, create_consumer, create_producer, publish_event
+from ml.features.network_flow import (
+    DEFAULT_BUNDLE_PATH,
+    AnomalyModelBundle,
+    InvalidTelemetryError,
+    ModelBundleError,
+    load_anomaly_bundle,
+)
 
 
-_model_dir = _repo_root / "ml" / "models"
-try:
-    anomaly_model = joblib.load(_model_dir / "anomaly_model.pkl")
-    anomaly_scaler = joblib.load(_model_dir / "anomaly_scaler.pkl")
-    anomaly_features = joblib.load(_model_dir / "anomaly_features.pkl")
-    print("Isolation Forest model loaded successfully\n")
-    MODEL_AVAILABLE = True
-except FileNotFoundError:
-    print("Trained anomaly model not found; using rule-based detection.\n")
-    MODEL_AVAILABLE = False
+DETECTION_MODE = os.environ.get("DETECTION_MODE", "ml").strip().lower()
+ANOMALY_BUNDLE_PATH = Path(
+    os.environ.get("ANOMALY_MODEL_BUNDLE", str(DEFAULT_BUNDLE_PATH))
+)
 
-
-EVENT_FLOW_FEATURES = {
-    "malware_detected": [5000, 50, 200, 900000, 50, 1200, 800, 5, 40, 900],
-    "privilege_escalation": [3000, 30, 150, 700000, 40, 1000, 600, 4, 35, 800],
-    "unauthorized_access": [4000, 40, 180, 850000, 45, 1100, 700, 5, 38, 850],
-    "port_scan": [1000, 200, 10, 500000, 80, 100, 50, 2, 10, 120],
-    "ddos_attempt": [8000, 500, 50, 999999, 99, 200, 100, 8, 60, 300],
-    "failed_login": [500, 10, 5, 100000, 20, 400, 300, 1, 15, 380],
-    "unknown": [200, 5, 3, 50000, 10, 300, 200, 0, 10, 280],
+FALLBACK_RULE_VERSION = "telemetry-rules-v1"
+FALLBACK_RULE_BASIS = (
+    "Documented local demo limits for observed packet and byte rates; "
+    "not learned model thresholds"
+)
+FALLBACK_THRESHOLDS = {
+    "high_packets_per_second": 100_000.0,
+    "high_bytes_per_second": 50_000_000.0,
+    "medium_packets_per_second": 10_000.0,
+    "medium_bytes_per_second": 5_000_000.0,
 }
 
-FEATURE_ORDER = [
-    "Flow Duration",
-    "Total Fwd Packets",
-    "Total Backward Packets",
-    "Flow Bytes/s",
-    "Flow Packets/s",
-    "Fwd Packet Length Mean",
-    "Bwd Packet Length Mean",
-    "SYN Flag Count",
-    "ACK Flag Count",
-    "Average Packet Size",
-]
+
+def load_detection_runtime(
+    mode: str = DETECTION_MODE,
+    bundle_path: Path = ANOMALY_BUNDLE_PATH,
+) -> AnomalyModelBundle | None:
+    normalized_mode = mode.strip().lower()
+    if normalized_mode == "ml":
+        return load_anomaly_bundle(bundle_path)
+    if normalized_mode == "rule_based":
+        return None
+    raise ValueError(
+        f"Unsupported DETECTION_MODE '{mode}'. Use 'ml' or 'rule_based'."
+    )
 
 
-def extract_features(event: SOCEvent) -> np.ndarray:
-    defaults = EVENT_FLOW_FEATURES.get(event.event, EVENT_FLOW_FEATURES["unknown"])
-    values = [
-        float(event.telemetry.flow_features.get(name, defaults[index]))
-        for index, name in enumerate(FEATURE_ORDER)
-    ]
-    return np.array(values).reshape(1, -1)
+def _numeric_telemetry(event: SOCEvent, feature: str) -> float:
+    value = event.telemetry.flow_features.get(feature)
+    if value is None:
+        return 0.0
+    if isinstance(value, bool):
+        raise InvalidTelemetryError(f"Feature '{feature}' must be numeric")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise InvalidTelemetryError(f"Feature '{feature}' must be numeric") from exc
 
 
-def ml_severity(event: SOCEvent) -> tuple[str, float]:
-    features = extract_features(event)
-    scaled = anomaly_scaler.transform(features)
-    prediction = anomaly_model.predict(scaled)[0]
-    anomaly_score = float(anomaly_model.score_samples(scaled)[0])
+def fallback_severity(event: SOCEvent) -> str:
+    """Explicit fallback based only on observed telemetry."""
 
-    if prediction == -1:
-        return ("HIGH" if anomaly_score < -0.15 else "MEDIUM"), anomaly_score
-    return "LOW", anomaly_score
-
-
-HIGH_SEVERITY = {"malware_detected", "privilege_escalation", "unauthorized_access"}
-MEDIUM_SEVERITY = {"port_scan", "ddos_attempt"}
-
-
-def rule_severity(event: str) -> str:
-    if event in HIGH_SEVERITY:
+    packets_per_second = _numeric_telemetry(event, "Flow Packets/s")
+    bytes_per_second = _numeric_telemetry(event, "Flow Bytes/s")
+    if (
+        packets_per_second >= FALLBACK_THRESHOLDS["high_packets_per_second"]
+        or bytes_per_second >= FALLBACK_THRESHOLDS["high_bytes_per_second"]
+    ):
         return "HIGH"
-    if event in MEDIUM_SEVERITY:
+    if (
+        packets_per_second >= FALLBACK_THRESHOLDS["medium_packets_per_second"]
+        or bytes_per_second >= FALLBACK_THRESHOLDS["medium_bytes_per_second"]
+    ):
         return "MEDIUM"
     return "LOW"
 
@@ -91,16 +90,60 @@ failed_login_counter: dict[str, int] = defaultdict(int)
 failed_login_results: dict[str, int] = {}
 
 
-def process_event(event: SOCEvent) -> SOCEvent:
-    """Apply detection while preserving canonical identity."""
+def process_event(
+    event: SOCEvent,
+    *,
+    mode: str,
+    bundle: AnomalyModelBundle | None = None,
+) -> SOCEvent:
+    """Apply detection; ML inputs come only from telemetry.flow_features."""
 
-    if MODEL_AVAILABLE:
-        severity, anomaly_score = ml_severity(event)
-        detection_method = "isolation_forest"
+    normalized_mode = mode.strip().lower()
+    if normalized_mode == "ml":
+        if bundle is None:
+            raise ModelBundleError(
+                "ML detection is configured but no validated anomaly bundle is loaded"
+            )
+        inference = bundle.infer(event.telemetry.flow_features)
+        severity = inference.severity
+        anomaly_score = round(inference.decision_score, 6)
+        detection = DetectionMetadata(
+            method="isolation_forest",
+            anomaly_score=anomaly_score,
+            decision_score=anomaly_score,
+            model_available=True,
+            model_status="loaded",
+            model_version=bundle.metadata.model_version,
+            feature_pipeline_version=bundle.metadata.feature_pipeline_version,
+            threshold_version=bundle.thresholds.version,
+            threshold_basis=bundle.thresholds.basis,
+            thresholds={
+                "anomaly_decision_threshold": (
+                    bundle.thresholds.anomaly_decision_threshold
+                ),
+                "high_severity_decision_threshold": (
+                    bundle.thresholds.high_severity_decision_threshold
+                ),
+            },
+        )
+    elif normalized_mode == "rule_based":
+        severity = fallback_severity(event)
+        detection = DetectionMetadata(
+            method="rule_based_fallback",
+            anomaly_score=None,
+            decision_score=None,
+            model_available=False,
+            model_status="explicit_fallback",
+            model_version=FALLBACK_RULE_VERSION,
+            feature_pipeline_version=None,
+            threshold_version=FALLBACK_RULE_VERSION,
+            threshold_basis=FALLBACK_RULE_BASIS,
+            thresholds=FALLBACK_THRESHOLDS,
+        )
     else:
-        severity = rule_severity(event.event)
-        anomaly_score = None
-        detection_method = "rule_based"
+        raise ValueError(
+            f"Unsupported detection mode '{mode}'. Use 'ml' or 'rule_based'."
+        )
 
     failed_login_count = None
     if event.event == "failed_login" and event.source_ip:
@@ -111,27 +154,42 @@ def process_event(event: SOCEvent) -> SOCEvent:
         failed_login_count = failed_login_results[identity]
         if failed_login_count > 5:
             severity = "HIGH"
+        detection.failed_login_count = failed_login_count
 
     enriched = event.model_copy(deep=True)
     enriched.severity = Severity(severity)
-    enriched.detection = DetectionMetadata(
-        method=detection_method,
-        anomaly_score=round(anomaly_score, 4) if anomaly_score is not None else None,
-        model_available=MODEL_AVAILABLE,
-        failed_login_count=failed_login_count,
-    )
+    enriched.detection = detection
     enriched.telemetry.failed_login_count = failed_login_count
     return enriched.advance_stage(StageName.DETECTION, "detection-agent")
 
 
 def main() -> None:
+    try:
+        bundle = load_detection_runtime()
+    except (ModelBundleError, ValueError) as exc:
+        raise SystemExit(f"Detection configuration error: {exc}") from exc
+
+    if bundle is None:
+        print(
+            f"Detection Agent Running in explicit fallback mode "
+            f"({FALLBACK_RULE_VERSION})\n"
+        )
+    else:
+        print(
+            f"Detection Agent Running with {bundle.metadata.model_version} "
+            f"from {ANOMALY_BUNDLE_PATH}\n"
+        )
+
     consumer = create_consumer("soc_logs", "soc-detection")
     producer = create_producer()
     init_db()
-    print("Detection Agent Running...\n")
 
     def handle(payload: dict) -> None:
-        event = process_event(deserialize_event(payload))
+        event = process_event(
+            deserialize_event(payload),
+            mode=DETECTION_MODE,
+            bundle=bundle,
+        )
         persist_event(event)
         publish_event(producer, "soc_alerts", event)
         print(json.dumps(event.to_message(), default=str), flush=True)
