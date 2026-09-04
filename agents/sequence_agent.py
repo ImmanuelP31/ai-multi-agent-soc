@@ -17,84 +17,71 @@ if str(_repo_root) not in sys.path:
 
 from common.events import InvestigationMetadata, SOCEvent, StageName, deserialize_event
 from common.kafka import consume_forever, create_consumer, create_producer, publish_event
+from ml.sequence_detection.pipeline import (
+    SEQUENCE_FEATURES,
+    SEQUENCE_LENGTH as DEFAULT_SEQUENCE_LENGTH,
+    load_preprocessor,
+    validate_metadata,
+)
 
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-SEQUENCE_LENGTH = 5
+SEQUENCE_LENGTH = DEFAULT_SEQUENCE_LENGTH
+NUM_FEATURES = len(SEQUENCE_FEATURES)
 
-MODEL_PATH = _repo_root / "ml" / "sequence_detection" / "sequence_model.h5"
+MODEL_PATH = _repo_root / "ml" / "sequence_detection" / "sequence_model.keras"
 LABEL_MAP_PATH = _repo_root / "ml" / "sequence_detection" / "label_mapping.json"
+METADATA_PATH = _repo_root / "ml" / "sequence_detection" / "metadata.json"
+PREPROCESSOR_PATH = (
+    _repo_root / "ml" / "sequence_detection" / "sequence_preprocessor.joblib"
+)
 
 model = None
+sequence_preprocessor = None
 reverse_mapping: dict[int, str] = {}
 
 
 def load_sequence_assets() -> None:
-    global model, reverse_mapping
+    global model, sequence_preprocessor, reverse_mapping, SEQUENCE_LENGTH, NUM_FEATURES
     from tensorflow.keras.models import load_model
 
-    model = load_model(MODEL_PATH)
+    with open(METADATA_PATH, encoding="utf-8") as file:
+        metadata = json.load(file)
     with open(LABEL_MAP_PATH) as file:
         label_mapping = json.load(file)
+    validate_metadata(metadata, label_mapping)
+    if metadata.get("status") != "trained":
+        raise RuntimeError(
+            "Sequence metadata requires retraining; run the generation and "
+            "training scripts before starting sequence_agent."
+        )
+    SEQUENCE_LENGTH = int(metadata["sequence_length"])
+    NUM_FEATURES = int(metadata["num_features"])
+    sequence_preprocessor = load_preprocessor(PREPROCESSOR_PATH)
+    model = load_model(MODEL_PATH)
+    expected_shape = (None, SEQUENCE_LENGTH, NUM_FEATURES)
+    if model.input_shape != expected_shape:
+        raise RuntimeError(
+            f"Sequence model expects {model.input_shape}; expected {expected_shape}"
+        )
     reverse_mapping = {int(value): key for key, value in label_mapping.items()}
 
 
-severity_encoding = {
-    "UNKNOWN": 0,
-    "LOW": 0,
-    "MEDIUM": 1,
-    "HIGH": 2,
-    "CRITICAL": 3,
-}
 event_windows: dict[str, deque[tuple[str, list[float]]]] = {}
 
 
-def _feature_vector(
-    event: SOCEvent,
-    attack_frequency: int,
-    repeated_offender: bool,
-) -> list[float]:
-    label_mapping = {name: index for index, name in reverse_mapping.items()}
-    packet_rate = (
-        event.telemetry.packet_rate
-        or (event.telemetry.failed_login_count or 1) * 100
-    )
-    anomaly_score = event.detection.anomaly_score
-    if anomaly_score is None:
-        anomaly_score = 0.9 if event.severity.value == "HIGH" else 0.4
-    return [
-        float(label_mapping.get(event.event, 0)),
-        float(severity_encoding.get(event.severity.value, 0)),
-        float(anomaly_score),
-        float(packet_rate),
-        float(attack_frequency),
-        float(repeated_offender),
-    ]
-
-
-def _frequency_for_event(redis_client, event: SOCEvent) -> int:
-    result_key = f"sequence-frequency-result:{event.event_id}"
-    source = event.source_ip or str(event.incident_id)
-    frequency_key = f"freq:{source}"
-    script = """
-    local previous = redis.call('GET', KEYS[1])
-    if previous then
-        return tonumber(previous)
-    end
-    local frequency = redis.call('INCR', KEYS[2])
-    redis.call('EXPIRE', KEYS[2], ARGV[1])
-    redis.call('SETEX', KEYS[1], ARGV[1], frequency)
-    return frequency
-    """
-    return int(redis_client.eval(script, 2, result_key, frequency_key, 3600))
+def _feature_vector(event: SOCEvent) -> list[float]:
+    if sequence_preprocessor is None:
+        raise RuntimeError("Sequence preprocessor is not loaded")
+    return sequence_preprocessor.transform_telemetry(
+        event.telemetry.flow_features
+    )[0].tolist()
 
 
 def process_event(event: SOCEvent, redis_client) -> SOCEvent | None:
     source = event.source_ip or str(event.incident_id)
-    attack_frequency = _frequency_for_event(redis_client, event)
-    repeated_offender = attack_frequency > 3
-    vector = _feature_vector(event, attack_frequency, repeated_offender)
+    vector = _feature_vector(event)
 
     if source not in event_windows:
         event_windows[source] = deque(maxlen=SEQUENCE_LENGTH)
@@ -115,8 +102,6 @@ def process_event(event: SOCEvent, redis_client) -> SOCEvent | None:
     confidence = float(np.max(prediction))
 
     enriched = event.model_copy(deep=True)
-    enriched.telemetry.attack_frequency = attack_frequency
-    enriched.telemetry.repeated_ip = repeated_offender
     enriched.telemetry.extra["sequence"] = sequence
     enriched.telemetry.extra["type"] = "sequence_correlation"
     enriched.investigation_metadata = InvestigationMetadata(

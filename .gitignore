@@ -9,9 +9,11 @@ venv/
 *.pkl
 *.joblib
 *.h5
+*.keras
 
 # Sequence Files
 *.npy
+*.npz
 
 # Large Datasets
 *.csv

@@ -21,6 +21,12 @@ from common.events import (
     deserialize_event,
 )
 from common.kafka import consume_forever, create_consumer, create_producer, publish_event
+from ml.sequence_detection.pipeline import (
+    SEQUENCE_FEATURES,
+    SEQUENCE_LENGTH as DEFAULT_SEQUENCE_LENGTH,
+    load_preprocessor,
+    validate_metadata,
+)
 
 
 _seq_dir = _repo_root / "ml" / "sequence_detection"
@@ -28,17 +34,19 @@ MODEL_AVAILABLE = False
 MODEL_STATUS = "not_loaded"
 MODEL_ERROR_MESSAGE = ""
 lstm_model = None
+sequence_preprocessor = None
 LABEL_MAPPING: dict[int, str] = {}
-SEQUENCE_LENGTH = 5
-NUM_FEATURES = 6
+SEQUENCE_LENGTH = DEFAULT_SEQUENCE_LENGTH
+NUM_FEATURES = len(SEQUENCE_FEATURES)
 
 _meta_path = _seq_dir / "metadata.json"
 if _meta_path.exists():
     with open(_meta_path) as file:
         metadata = json.load(file)
-    SEQUENCE_LENGTH = metadata.get("sequence_length", 5)
-    NUM_FEATURES = metadata.get("num_features", 6)
+    SEQUENCE_LENGTH = metadata.get("sequence_length", DEFAULT_SEQUENCE_LENGTH)
+    NUM_FEATURES = metadata.get("num_features", len(SEQUENCE_FEATURES))
 else:
+    metadata = {}
     print("metadata.json not found; using sequence defaults")
 
 _label_path = _seq_dir / "label_mapping.json"
@@ -49,11 +57,23 @@ if _label_path.exists():
 else:
     print("label_mapping.json not found; predictions will use class indexes")
 
-_model_path = _seq_dir / "sequence_model.h5"
-if _model_path.exists():
+_model_path = _seq_dir / "sequence_model.keras"
+_preprocessor_path = _seq_dir / "sequence_preprocessor.joblib"
+if metadata.get("status") != "trained":
+    MODEL_STATUS = "requires_retraining"
+    MODEL_ERROR_MESSAGE = (
+        "The leakage-free sequence model has not been trained. Expected "
+        f"artifacts: {_model_path} and {_preprocessor_path}. Run "
+        "ml/sequence_detection/generate_rich_sequences.py followed by "
+        "ml/sequence_detection/train_lstm_model.py, or add compatible "
+        "artifacts manually, then restart the investigation agent."
+    )
+elif _model_path.exists() and _preprocessor_path.exists():
     try:
         from tensorflow.keras.models import load_model  # type: ignore
 
+        validate_metadata(metadata, {name: index for index, name in LABEL_MAPPING.items()})
+        sequence_preprocessor = load_preprocessor(_preprocessor_path)
         lstm_model = load_model(str(_model_path))
         actual_shape = lstm_model.input_shape
         expected_shape = (None, SEQUENCE_LENGTH, NUM_FEATURES)
@@ -71,11 +91,16 @@ if _model_path.exists():
         MODEL_STATUS = "load_error"
         MODEL_ERROR_MESSAGE = f"Could not load {_model_path}: {exc}"
 else:
-    MODEL_STATUS = "missing_model_file"
+    MODEL_STATUS = "missing_model_artifacts"
+    missing = [
+        str(path)
+        for path in (_model_path, _preprocessor_path)
+        if not path.exists()
+    ]
     MODEL_ERROR_MESSAGE = (
-        f"Trained sequence model file is missing. Expected file: {_model_path}. "
-        "Add it manually or run ml/sequence_detection/train_lstm_model.py, "
-        "then restart the investigation agent."
+        f"Trained sequence artifacts are missing: {', '.join(missing)}. Add "
+        "compatible artifacts manually or run the sequence generation and "
+        "training scripts, then restart the investigation agent."
     )
 
 if not MODEL_AVAILABLE:
@@ -110,24 +135,16 @@ def get_context(attack_name: str) -> str:
     return f"Unknown predicted attack '{attack_name}'; manual review is required."
 
 
-EVENT_FEATURE_VECTOR = {
-    "malware_detected": [4, 2, 0.80, 8000, 5, 1],
-    "privilege_escalation": [5, 2, 0.85, 7000, 4, 1],
-    "unauthorized_access": [6, 2, 0.75, 6000, 3, 0],
-    "port_scan": [2, 1, 0.40, 9000, 10, 0],
-    "ddos_attempt": [1, 3, 0.95, 15000, 8, 1],
-    "failed_login": [0, 0, 0.20, 2000, 2, 0],
-    "unknown": [0, 0, 0.10, 500, 0, 0],
-}
-
 ip_windows: dict[str, deque[tuple[str, list[float]]]] = {}
 
 
 def get_feature_vector(event: SOCEvent) -> list[float]:
-    vector = list(EVENT_FEATURE_VECTOR.get(event.event, EVENT_FEATURE_VECTOR["unknown"]))
-    if len(vector) >= NUM_FEATURES:
-        return vector[:NUM_FEATURES]
-    return vector + [0.0] * (NUM_FEATURES - len(vector))
+    if sequence_preprocessor is None:
+        raise RuntimeError("Sequence preprocessor is not loaded")
+    transformed = sequence_preprocessor.transform_telemetry(
+        event.telemetry.flow_features
+    )
+    return transformed[0].tolist()
 
 
 def update_window(event: SOCEvent) -> list[list[float]]:
@@ -142,10 +159,9 @@ def update_window(event: SOCEvent) -> list[list[float]]:
 
 
 def predict_next_attack(window: list[list[float]]) -> tuple[str, float]:
-    sequence = list(window)
-    while len(sequence) < SEQUENCE_LENGTH:
-        sequence.insert(0, [0.0] * NUM_FEATURES)
-    values = np.array(sequence, dtype=np.float32).reshape(
+    if len(window) != SEQUENCE_LENGTH:
+        raise ValueError(f"Expected {SEQUENCE_LENGTH} events, received {len(window)}")
+    values = np.array(window, dtype=np.float32).reshape(
         1, SEQUENCE_LENGTH, NUM_FEATURES
     )
     probabilities = lstm_model.predict(values, verbose=0)[0]
@@ -156,22 +172,34 @@ def predict_next_attack(window: list[list[float]]) -> tuple[str, float]:
 def process_event(event: SOCEvent) -> SOCEvent:
     """Apply sequence investigation while preserving canonical identity."""
 
-    window = update_window(event)
     source = event.source_ip or str(event.incident_id)
     if MODEL_AVAILABLE:
-        predicted_attack, confidence = predict_next_attack(window)
-        context = get_context(predicted_attack)
-        metadata = InvestigationMetadata(
-            summary=(
-                f"{context} LSTM predicted '{predicted_attack}' with "
-                f"{confidence * 100:.1f}% confidence from the last "
-                f"{len(window)} events for {source}."
-            ),
-            method="lstm_sequence_model",
-            predicted_next_attack=predicted_attack,
-            confidence=round(confidence, 4),
-            model_status=MODEL_STATUS,
-        )
+        window = update_window(event)
+        if len(window) == SEQUENCE_LENGTH:
+            predicted_attack, confidence = predict_next_attack(window)
+            context = get_context(predicted_attack)
+            metadata = InvestigationMetadata(
+                summary=(
+                    f"{context} LSTM predicted '{predicted_attack}' with "
+                    f"{confidence * 100:.1f}% confidence from the last "
+                    f"{len(window)} events for {source}."
+                ),
+                method="lstm_sequence_model",
+                predicted_next_attack=predicted_attack,
+                confidence=round(confidence, 4),
+                model_status=MODEL_STATUS,
+            )
+        else:
+            metadata = InvestigationMetadata(
+                summary=(
+                    f"Collecting telemetry history for {source}: {len(window)}/"
+                    f"{SEQUENCE_LENGTH} events. No prediction was generated."
+                ),
+                method="lstm_sequence_model_warming_up",
+                predicted_next_attack=None,
+                confidence=None,
+                model_status="warming_up",
+            )
     else:
         metadata = InvestigationMetadata(
             summary=(

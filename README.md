@@ -204,25 +204,40 @@ with `DETECTION_MODE=rule_based`; alerts then report
 
 ## LSTM Prediction Notes
 
-The LSTM model artifact is intentionally not committed because `.h5` and
-`.npy` files are ignored. If `ml/sequence_detection/sequence_model.h5` is
-missing, the investigation agent does not generate a fallback next-attack
-prediction. Alerts will show `investigation_method:
-lstm_sequence_model_unavailable`, `lstm_status: missing_model_file`, and an
-investigation message with the exact path where the model file is expected.
+The sequence experiment uses the same ten numeric CICIDS flow fields at
+training and runtime. Attack labels, severity, label frequency, and synthetic
+repeat-offender flags are not model inputs. Labels are used only as the next
+event target and as historical context for the comparison-only Markov baseline.
+
+Source CSV files are assigned to train, validation, or test before sliding
+windows are created. Within each file, windows are built separately for a real
+source/session column when available; otherwise the source file is the explicit
+chronological boundary. No window crosses an entity or split boundary, and the
+imputer and scaler are fitted on training groups only.
+
+The previous 85.07% result is invalidated because it used label-derived
+features and randomly split overlapping windows. A replacement score is only
+recorded after evaluation on untouched source groups. Evaluation includes
+accuracy, macro and weighted F1, top-3 accuracy, per-class metrics/support, and
+a confusion matrix for both the LSTM and first-order Markov baseline.
 
 To enable the real LSTM path:
 
 ```bash
 python ml/sequence_detection/generate_rich_sequences.py
 python ml/sequence_detection/train_lstm_model.py
+python ml/sequence_detection/test_lstm_model.py
 docker compose up -d --build investigation-agent
 ```
 
-When the model is loaded, new alerts will show
-`investigation_method: lstm_sequence_model`. If the model is unavailable, they
-will show `investigation_method: lstm_sequence_model_unavailable` and include
-`lstm_status`.
+Training writes `sequence_dataset.npz`, `sequence_preprocessor.joblib`,
+`sequence_model.keras`, and machine-readable `sequence_evaluation.json` beside
+the versioned metadata. These generated artifacts are intentionally ignored by
+Git. When the compatible model and preprocessor are loaded, predictions begin
+after five telemetry events from the same source. If either artifact is absent
+or retraining is required, no rule-based next-attack prediction is substituted;
+alerts show `investigation_method: lstm_sequence_model_unavailable` and include
+the exact `lstm_status`.
 
 ## Dashboard Features
 
