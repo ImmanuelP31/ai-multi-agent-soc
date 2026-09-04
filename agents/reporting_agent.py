@@ -1,55 +1,46 @@
-"""
-Reporting Agent
-----------------
-Consumes remediation_actions alerts and produces:
+"""Create idempotent incident reports from remediated canonical events."""
 
-  1. A structured JSON incident report per alert (logs/reports/)
-  2. A running summary file (logs/incident_summary.json) updated after every alert
-  3. Console output with full incident details
+from __future__ import annotations
 
-Each report includes:
-  - Incident metadata (ID, timestamp, severity, event, IP, user)
-  - MITRE ATT&CK mapping + tactic
-  - Investigation summary + LSTM prediction
-  - All remediation actions taken
-  - Recommended next steps from threat intel
-"""
-
-import json
-import os
-import sys
-import uuid
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import sys
 
 _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from kafka import KafkaConsumer
+from backend.database import init_db, persist_event
+from common.events import (
+    ReportingMetadata,
+    SOCEvent,
+    StageName,
+    deserialize_event,
+)
+from common.kafka import consume_forever, create_consumer
 
-# =========================================================
-# OUTPUT DIRECTORIES
-# =========================================================
 
 REPORTS_DIR = _repo_root / "logs" / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
 SUMMARY_FILE = _repo_root / "logs" / "incident_summary.json"
 
 
 def load_summary() -> dict:
     if SUMMARY_FILE.exists():
         try:
-            return json.loads(SUMMARY_FILE.read_text())
-        except Exception:
+            summary = json.loads(SUMMARY_FILE.read_text())
+            summary.setdefault("processed_incident_ids", [])
+            return summary
+        except (OSError, json.JSONDecodeError):
             pass
     return {
-        "total_incidents":    0,
-        "by_severity":        {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
-        "by_tactic":          {},
-        "top_ips":            {},
-        "last_updated":       None,
+        "total_incidents": 0,
+        "by_severity": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
+        "by_tactic": {},
+        "top_ips": {},
+        "processed_incident_ids": [],
+        "last_updated": None,
     }
 
 
@@ -59,59 +50,68 @@ def save_summary(summary: dict) -> None:
 
 
 def update_summary(summary: dict, report: dict) -> dict:
+    incident_id = report["incident_id"]
+    processed = summary.setdefault("processed_incident_ids", [])
+    if incident_id in processed:
+        return summary
+
+    processed.append(incident_id)
     summary["total_incidents"] += 1
-
-    sev = report.get("severity", "LOW")
-    summary["by_severity"][sev] = summary["by_severity"].get(sev, 0) + 1
-
-    tactic = report.get("mitre_tactic", "Unknown")
+    severity = report.get("severity", "LOW")
+    summary["by_severity"][severity] = summary["by_severity"].get(severity, 0) + 1
+    tactic = report.get("mitre_tactic", "Unknown") or "Unknown"
     summary["by_tactic"][tactic] = summary["by_tactic"].get(tactic, 0) + 1
-
-    ip = report.get("ip") or "unknown"
-    summary["top_ips"][ip] = summary["top_ips"].get(ip, 0) + 1
-
+    source_ip = report.get("ip") or "unknown"
+    summary["top_ips"][source_ip] = summary["top_ips"].get(source_ip, 0) + 1
     return summary
 
 
-# =========================================================
-# REPORT BUILDER
-# =========================================================
+def process_event(event: SOCEvent) -> SOCEvent:
+    """Mark reporting complete without changing event or incident identity."""
 
-def build_report(alert: dict) -> dict:
-    incident_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
-    now         = datetime.now(timezone.utc).isoformat()
+    generated_at = datetime.now(timezone.utc)
+    enriched = event.model_copy(deep=True)
+    enriched.reporting = ReportingMetadata(
+        generated_at=generated_at,
+        report_path=str(REPORTS_DIR / f"{event.incident_id}.json"),
+    )
+    return enriched.advance_stage(StageName.REPORTING, "reporting-agent")
 
+
+def build_report(event: SOCEvent) -> dict:
+    generated_at = event.reporting.generated_at or datetime.now(timezone.utc)
     return {
-        "incident_id":          incident_id,
-        "generated_at":         now,
-
-        # Core fields
-        "event":                alert.get("event", "unknown"),
-        "severity":             alert.get("severity", "LOW"),
-        "ip":                   alert.get("ip"),
-        "user":                 alert.get("user"),
-        "timestamp":            alert.get("timestamp", now),
-
-        # Detection
-        "detection_method":     alert.get("detection_method", "unknown"),
-        "anomaly_score":        alert.get("anomaly_score"),
-
-        # Investigation
-        "investigation":        alert.get("investigation"),
-        "investigation_method": alert.get("investigation_method"),
-        "predicted_next_attack":alert.get("predicted_next_attack"),
-        "lstm_confidence":      alert.get("confidence"),
-
-        # Threat Intelligence
-        "mitre_attack":         alert.get("mitre_attack"),
-        "mitre_tactic":         alert.get("mitre_tactic"),
-        "mitre_confidence":     alert.get("mitre_confidence"),
-        "recommended_action":   alert.get("recommended_action"),
-
-        # Remediation
-        "remediation_actions":  alert.get("remediation_actions", []),
-        "remediation_count":    alert.get("remediation_count", 0),
-        "remediated_at":        alert.get("remediated_at"),
+        "event_id": str(event.event_id),
+        "incident_id": str(event.incident_id),
+        "schema_version": event.schema_version,
+        "generated_at": generated_at.isoformat(),
+        "event": event.event,
+        "severity": event.severity.value,
+        "ip": event.source_ip,
+        "user": event.user,
+        "timestamp": event.observed_at.isoformat(),
+        "detection_method": event.detection.method or "unknown",
+        "anomaly_score": event.detection.anomaly_score,
+        "investigation": event.investigation_metadata.summary,
+        "investigation_method": event.investigation_metadata.method,
+        "predicted_next_attack": (
+            event.investigation_metadata.predicted_next_attack
+        ),
+        "lstm_confidence": event.investigation_metadata.confidence,
+        "mitre_attack": event.threat_intelligence.mitre_attack,
+        "mitre_tactic": event.threat_intelligence.mitre_tactic,
+        "mitre_confidence": event.threat_intelligence.confidence,
+        "recommended_action": event.threat_intelligence.recommended_action,
+        "remediation_actions": [
+            action.model_dump(mode="json") for action in event.remediation.actions
+        ],
+        "remediation_count": len(event.remediation.actions),
+        "remediated_at": (
+            event.remediation.remediated_at.isoformat()
+            if event.remediation.remediated_at
+            else None
+        ),
+        "stage": event.stage.model_dump(mode="json"),
     }
 
 
@@ -122,71 +122,44 @@ def write_report(report: dict) -> Path:
 
 
 def print_report(report: dict) -> None:
-    sep = "=" * 60
-    print(f"\n{sep}")
+    separator = "=" * 60
+    print(f"\n{separator}")
     print(f"  INCIDENT REPORT  |  {report['incident_id']}")
-    print(sep)
-    print(f"  Timestamp  : {report['generated_at']}")
+    print(separator)
     print(f"  Event      : {report['event']}")
     print(f"  Severity   : {report['severity']}")
     print(f"  Source IP  : {report['ip'] or 'N/A'}")
     print(f"  User       : {report['user'] or 'N/A'}")
-    print(f"\n  [Detection]")
-    print(f"  Method     : {report['detection_method']}")
-    if report['anomaly_score'] is not None:
-        print(f"  Anomaly Sc.: {report['anomaly_score']}")
-    print(f"\n  [Investigation]")
-    print(f"  {report['investigation']}")
-    if report['predicted_next_attack']:
-        print(f"  LSTM Pred  : {report['predicted_next_attack']} ({report['lstm_confidence'] * 100:.1f}% conf)" if report['lstm_confidence'] else f"  LSTM Pred  : {report['predicted_next_attack']}")
-    print(f"\n  [Threat Intel]")
+    print(f"  Detection  : {report['detection_method']}")
+    print(f"  Prediction : {report['predicted_next_attack'] or 'unavailable'}")
     print(f"  MITRE      : {report['mitre_attack'] or 'N/A'}")
     print(f"  Tactic     : {report['mitre_tactic'] or 'N/A'}")
-    print(f"  Action     : {report['recommended_action'] or 'N/A'}")
-    print(f"\n  [Remediation — {report['remediation_count']} action(s)]")
-    for a in report["remediation_actions"]:
-        print(f"  → {a['action']} on {a.get('target', 'N/A')} [{a['status'].upper()}]")
-    print(sep + "\n", flush=True)
+    print(f"  Actions    : {report['remediation_count']}")
+    print(separator + "\n", flush=True)
 
 
-# =========================================================
-# KAFKA SETUP
-# =========================================================
+def main() -> None:
+    consumer = create_consumer("remediation_actions", "soc-reporting")
+    init_db()
+    summary = load_summary()
+    print("Reporting Agent Running...\n")
 
-_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
+    def handle(payload: dict) -> None:
+        event = process_event(deserialize_event(payload))
+        report = build_report(event)
+        report_path = write_report(report)
+        update_summary(summary, report)
+        save_summary(summary)
+        persist_event(event)
+        print_report(report)
+        print(
+            f"Report saved: {report_path.name} | "
+            f"Total incidents: {summary['total_incidents']}",
+            flush=True,
+        )
 
-consumer = KafkaConsumer(
-    "remediation_actions",
-    bootstrap_servers=_bootstrap,
-    auto_offset_reset="earliest",
-    value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-)
+    consume_forever(consumer, handle, "reporting-agent")
 
-print("Reporting Agent Running...\n")
 
-summary = load_summary()
-
-# =========================================================
-# MAIN CONSUMER LOOP
-# =========================================================
-
-for message in consumer:
-
-    alert  = message.value
-    report = build_report(alert)
-
-    # Write JSON report file
-    report_path = write_report(report)
-
-    # Update and save running summary
-    summary = update_summary(summary, report)
-    save_summary(summary)
-
-    # Print to console
-    print_report(report)
-
-    print(
-        f"📄 Report saved → {report_path.name} "
-        f"| Total incidents: {summary['total_incidents']}",
-        flush=True,
-    )
+if __name__ == "__main__":
+    main()

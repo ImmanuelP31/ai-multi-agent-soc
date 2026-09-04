@@ -1,37 +1,29 @@
-"""
-Investigation Agent
--------------------
-Consumes alerts from `soc_alerts` and enriches each alert with:
-  - next-attack sequence prediction
-  - confidence score
-  - human-readable investigation summary
-
-The trained LSTM model is required for next-attack prediction. If
-`ml/sequence_detection/sequence_model.h5` cannot be loaded, the agent keeps the
-alert pipeline alive but does not emit a fallback prediction.
-"""
+"""Enrich canonical SOC events with trained LSTM sequence predictions."""
 
 from __future__ import annotations
 
-import json
-import os
-import sys
 from collections import deque
+import json
 from pathlib import Path
+import sys
 
 import numpy as np
-from kafka import KafkaConsumer, KafkaProducer
 
 _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-# =========================================================
-# LOAD MODEL + MAPPINGS DYNAMICALLY
-# =========================================================
+from backend.database import init_db, persist_event
+from common.events import (
+    InvestigationMetadata,
+    SOCEvent,
+    StageName,
+    deserialize_event,
+)
+from common.kafka import consume_forever, create_consumer, create_producer, publish_event
+
 
 _seq_dir = _repo_root / "ml" / "sequence_detection"
-
 MODEL_AVAILABLE = False
 MODEL_STATUS = "not_loaded"
 MODEL_ERROR_MESSAGE = ""
@@ -42,22 +34,20 @@ NUM_FEATURES = 6
 
 _meta_path = _seq_dir / "metadata.json"
 if _meta_path.exists():
-    with open(_meta_path) as f:
-        _meta = json.load(f)
-    SEQUENCE_LENGTH = _meta.get("sequence_length", 5)
-    NUM_FEATURES = _meta.get("num_features", 6)
-    print(f"Sequence config: length={SEQUENCE_LENGTH}, features={NUM_FEATURES}")
+    with open(_meta_path) as file:
+        metadata = json.load(file)
+    SEQUENCE_LENGTH = metadata.get("sequence_length", 5)
+    NUM_FEATURES = metadata.get("num_features", 6)
 else:
-    print("WARNING: metadata.json not found - using defaults (len=5, feat=6)")
+    print("metadata.json not found; using sequence defaults")
 
 _label_path = _seq_dir / "label_mapping.json"
 if _label_path.exists():
-    with open(_label_path) as f:
-        _raw_mapping = json.load(f)
-    LABEL_MAPPING = {int(v): k for k, v in _raw_mapping.items()}
-    print(f"Label mapping loaded: {len(LABEL_MAPPING)} classes")
+    with open(_label_path) as file:
+        raw_mapping = json.load(file)
+    LABEL_MAPPING = {int(value): key for key, value in raw_mapping.items()}
 else:
-    print("WARNING: label_mapping.json not found - predictions will show raw class index")
+    print("label_mapping.json not found; predictions will use class indexes")
 
 _model_path = _seq_dir / "sequence_model.h5"
 if _model_path.exists():
@@ -67,76 +57,59 @@ if _model_path.exists():
         lstm_model = load_model(str(_model_path))
         actual_shape = lstm_model.input_shape
         expected_shape = (None, SEQUENCE_LENGTH, NUM_FEATURES)
-
         if actual_shape != expected_shape:
             MODEL_STATUS = "shape_mismatch"
             MODEL_ERROR_MESSAGE = (
-                f"Sequence model shape mismatch. Model expects {actual_shape}, "
-                f"but metadata says {expected_shape}. Rebuild or replace "
-                f"{_model_path}."
+                f"Sequence model expects {actual_shape}; metadata expects "
+                f"{expected_shape}. Replace {_model_path}."
             )
-            print(f"WARNING: {MODEL_ERROR_MESSAGE}")
         else:
             MODEL_AVAILABLE = True
             MODEL_STATUS = "loaded"
             print("LSTM sequence model loaded successfully\n")
     except Exception as exc:
         MODEL_STATUS = "load_error"
-        MODEL_ERROR_MESSAGE = (
-            f"Could not load trained sequence model at {_model_path}: {exc}"
-        )
-        print(f"WARNING: {MODEL_ERROR_MESSAGE}\n")
+        MODEL_ERROR_MESSAGE = f"Could not load {_model_path}: {exc}"
 else:
     MODEL_STATUS = "missing_model_file"
     MODEL_ERROR_MESSAGE = (
         f"Trained sequence model file is missing. Expected file: {_model_path}. "
-        "Add the model file manually or run ml/sequence_detection/train_lstm_model.py, "
+        "Add it manually or run ml/sequence_detection/train_lstm_model.py, "
         "then restart the investigation agent."
     )
+
+if not MODEL_AVAILABLE:
     print(f"WARNING: {MODEL_ERROR_MESSAGE}\n")
 
-# =========================================================
-# ATTACK CONTEXT
-# =========================================================
 
 ATTACK_CONTEXT = {
-    "BENIGN": "No malicious pattern detected in recent sequence.",
-    "DDoS": "DDoS attack pattern predicted - initiate traffic rate-limiting immediately.",
-    "PortScan": "Port scanning behaviour detected - potential reconnaissance in progress.",
-    "Bot": "Bot activity predicted - host may be part of a botnet.",
-    "Infiltration": "Infiltration sequence detected - lateral movement may be underway.",
-    "Web Attack \ufffd Brute Force": "Brute force sequence detected - consider account lockout and IP block.",
-    "Web Attack \ufffd XSS": "XSS attack sequence predicted - review web application firewall rules.",
-    "Web Attack \ufffd Sql Injection": "SQL injection sequence detected - database integrity at risk.",
-    "FTP-Patator": "FTP brute force predicted - restrict FTP access and rotate credentials.",
-    "SSH-Patator": "SSH brute force predicted - enforce key-based auth and block IP.",
-    "DoS slowloris": "Slowloris DoS predicted - connection timeout tuning recommended.",
-    "DoS Slowhttptest": "Slow HTTP DoS predicted - review server request timeout settings.",
-    "DoS Hulk": "Hulk DoS attack predicted - high-volume flood imminent.",
-    "DoS GoldenEye": "GoldenEye DoS predicted - application-layer flood likely.",
-    "Heartbleed": "Heartbleed exploit sequence detected - patch OpenSSL immediately.",
+    "BENIGN": "No malicious pattern detected in the recent sequence.",
+    "DDoS": "DDoS pattern predicted; initiate traffic rate limiting.",
+    "PortScan": "Port scanning predicted; reconnaissance may be in progress.",
+    "Bot": "Bot activity predicted; the host may be part of a botnet.",
+    "Infiltration": "Infiltration predicted; lateral movement may be underway.",
+    "Web Attack - Brute Force": "Brute force predicted; consider account lockout.",
+    "Web Attack - XSS": "XSS predicted; review web application firewall rules.",
+    "Web Attack - Sql Injection": "SQL injection predicted; database integrity is at risk.",
+    "FTP-Patator": "FTP brute force predicted; restrict FTP and rotate credentials.",
+    "SSH-Patator": "SSH brute force predicted; require key-based authentication.",
+    "DoS slowloris": "Slowloris predicted; tune connection timeouts.",
+    "DoS Slowhttptest": "Slow HTTP DoS predicted; review request timeouts.",
+    "DoS Hulk": "Hulk DoS predicted; a high-volume flood may be imminent.",
+    "DoS GoldenEye": "GoldenEye DoS predicted; an application flood is likely.",
+    "Heartbleed": "Heartbleed predicted; patch OpenSSL immediately.",
 }
 
 
 def get_context(attack_name: str) -> str:
     if attack_name in ATTACK_CONTEXT:
         return ATTACK_CONTEXT[attack_name]
-
-    for key, msg in ATTACK_CONTEXT.items():
+    for key, message in ATTACK_CONTEXT.items():
         if key.lower() in attack_name.lower():
-            return msg
+            return message
+    return f"Unknown predicted attack '{attack_name}'; manual review is required."
 
-    return f"Unknown attack pattern predicted: '{attack_name}' - manual analyst review required."
 
-
-# =========================================================
-# SLIDING WINDOW
-# =========================================================
-
-ip_windows: dict[str, deque] = {}
-
-# Feature columns:
-# [attack_encoded, severity_encoded, anomaly_score, packet_rate, attack_frequency, repeated_ip]
 EVENT_FEATURE_VECTOR = {
     "malware_detected": [4, 2, 0.80, 8000, 5, 1],
     "privilege_escalation": [5, 2, 0.85, 7000, 4, 1],
@@ -147,94 +120,90 @@ EVENT_FEATURE_VECTOR = {
     "unknown": [0, 0, 0.10, 500, 0, 0],
 }
 
-def _align_vector(vec: list) -> list:
-    if len(vec) >= NUM_FEATURES:
-        return vec[:NUM_FEATURES]
-    return vec + [0.0] * (NUM_FEATURES - len(vec))
+ip_windows: dict[str, deque[tuple[str, list[float]]]] = {}
 
 
-def get_feature_vector(alert: dict) -> list:
-    base = EVENT_FEATURE_VECTOR.get(
-        alert.get("event", "unknown"),
-        EVENT_FEATURE_VECTOR["unknown"],
+def get_feature_vector(event: SOCEvent) -> list[float]:
+    vector = list(EVENT_FEATURE_VECTOR.get(event.event, EVENT_FEATURE_VECTOR["unknown"]))
+    if len(vector) >= NUM_FEATURES:
+        return vector[:NUM_FEATURES]
+    return vector + [0.0] * (NUM_FEATURES - len(vector))
+
+
+def update_window(event: SOCEvent) -> list[list[float]]:
+    source = event.source_ip or str(event.incident_id)
+    if source not in ip_windows:
+        ip_windows[source] = deque(maxlen=SEQUENCE_LENGTH)
+    window = ip_windows[source]
+    event_id = str(event.event_id)
+    if not any(existing_id == event_id for existing_id, _ in window):
+        window.append((event_id, get_feature_vector(event)))
+    return [vector for _, vector in window]
+
+
+def predict_next_attack(window: list[list[float]]) -> tuple[str, float]:
+    sequence = list(window)
+    while len(sequence) < SEQUENCE_LENGTH:
+        sequence.insert(0, [0.0] * NUM_FEATURES)
+    values = np.array(sequence, dtype=np.float32).reshape(
+        1, SEQUENCE_LENGTH, NUM_FEATURES
     )
-    return _align_vector(base)
+    probabilities = lstm_model.predict(values, verbose=0)[0]
+    index = int(np.argmax(probabilities))
+    return LABEL_MAPPING.get(index, f"class_{index}"), float(probabilities[index])
 
 
-def update_window(ip: str, alert: dict) -> deque:
-    if ip not in ip_windows:
-        ip_windows[ip] = deque(maxlen=SEQUENCE_LENGTH)
+def process_event(event: SOCEvent) -> SOCEvent:
+    """Apply sequence investigation while preserving canonical identity."""
 
-    ip_windows[ip].append(get_feature_vector(alert))
-
-    return ip_windows[ip]
-
-
-def predict_next_attack(window: deque) -> tuple[str, float]:
-    seq = list(window)
-    while len(seq) < SEQUENCE_LENGTH:
-        seq.insert(0, [0.0] * NUM_FEATURES)
-
-    x = np.array(seq, dtype=np.float32).reshape(1, SEQUENCE_LENGTH, NUM_FEATURES)
-    probs = lstm_model.predict(x, verbose=0)[0]
-    idx = int(np.argmax(probs))
-    conf = float(probs[idx])
-    name = LABEL_MAPPING.get(idx, f"class_{idx}")
-    return name, conf
-
-
-# =========================================================
-# KAFKA SETUP
-# =========================================================
-
-_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
-
-consumer = KafkaConsumer(
-    "soc_alerts",
-    bootstrap_servers=_bootstrap,
-    auto_offset_reset="earliest",
-    value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-)
-
-producer = KafkaProducer(
-    bootstrap_servers=_bootstrap,
-    value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
-)
-
-print("Investigation Agent Running...\n")
-
-# =========================================================
-# MAIN CONSUMER LOOP
-# =========================================================
-
-for message in consumer:
-    alert = message.value
-    ip = alert.get("ip") or "unknown"
-    window = update_window(ip, alert)
-
+    window = update_window(event)
+    source = event.source_ip or str(event.incident_id)
     if MODEL_AVAILABLE:
-        predicted_attack, conf = predict_next_attack(window)
-        summary = get_context(predicted_attack)
-
-        alert["predicted_next_attack"] = predicted_attack
-        alert["confidence"] = round(conf, 4)
-        alert["investigation"] = (
-            f"{summary} "
-            f"(LSTM predicted '{predicted_attack}' with {conf * 100:.1f}% "
-            f"confidence based on last {len(window)} events from {ip}.)"
+        predicted_attack, confidence = predict_next_attack(window)
+        context = get_context(predicted_attack)
+        metadata = InvestigationMetadata(
+            summary=(
+                f"{context} LSTM predicted '{predicted_attack}' with "
+                f"{confidence * 100:.1f}% confidence from the last "
+                f"{len(window)} events for {source}."
+            ),
+            method="lstm_sequence_model",
+            predicted_next_attack=predicted_attack,
+            confidence=round(confidence, 4),
+            model_status=MODEL_STATUS,
         )
-        alert["investigation_method"] = "lstm_sequence_model"
-        alert["lstm_status"] = MODEL_STATUS
     else:
-        alert["predicted_next_attack"] = None
-        alert["confidence"] = None
-        alert["investigation"] = (
-            "Next-attack prediction unavailable because the trained LSTM "
-            f"sequence model is not loaded. Status: '{MODEL_STATUS}'. "
-            f"{MODEL_ERROR_MESSAGE}"
+        metadata = InvestigationMetadata(
+            summary=(
+                "Next-attack prediction unavailable because the trained LSTM "
+                f"model is not loaded. Status: '{MODEL_STATUS}'. "
+                f"{MODEL_ERROR_MESSAGE}"
+            ),
+            method="lstm_sequence_model_unavailable",
+            predicted_next_attack=None,
+            confidence=None,
+            model_status=MODEL_STATUS,
         )
-        alert["investigation_method"] = "lstm_sequence_model_unavailable"
-        alert["lstm_status"] = MODEL_STATUS
 
-    producer.send("investigated_alerts", alert)
-    print(json.dumps(alert, default=str), flush=True)
+    enriched = event.model_copy(deep=True)
+    enriched.investigation_metadata = metadata
+    return enriched.advance_stage(StageName.INVESTIGATION, "investigation-agent")
+
+
+def main() -> None:
+    consumer = create_consumer("soc_alerts", "soc-investigation")
+    producer = create_producer()
+    init_db()
+    print("Investigation Agent Running...\n")
+
+    def handle(payload: dict) -> None:
+        event = process_event(deserialize_event(payload))
+        persist_event(event)
+        publish_event(producer, "investigated_alerts", event)
+        print(json.dumps(event.to_message(), default=str), flush=True)
+
+    consume_forever(consumer, handle, "investigation-agent")
+
+
+if __name__ == "__main__":
+    main()

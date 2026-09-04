@@ -1,25 +1,42 @@
-from kafka import KafkaProducer
-import json
-import os
+"""Simple canonical SOC event producer for local Kafka testing."""
+
+from pathlib import Path
+import sys
 import time
 
-# From the host (venv): Docker maps EXTERNAL listener to localhost:9094 (see docker-compose.yml).
-# Override if needed: set KAFKA_BOOTSTRAP_SERVERS=kafka:9092 when running inside Compose.
-_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
+_repo_root = Path(__file__).resolve().parents[1]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
-producer = KafkaProducer(
-    bootstrap_servers=_bootstrap,
-    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-)
+from common.events import GroundTruthMetadata, SOCEvent
+from common.kafka import create_producer, publish_event
 
-logs = [
-    {"event": "failed_login", "ip": "192.168.1.10"},
-    {"event": "port_scan", "ip": "192.168.1.20"},
-    {"event": "malware_detected", "ip": "192.168.1.30"}
+
+LOGS = [
+    ("failed_login", "192.168.1.10"),
+    ("port_scan", "192.168.1.20"),
+    ("malware_detected", "192.168.1.30"),
 ]
 
-while True:
-    for log in logs:
-        producer.send('soc_logs', log)
-        print(f"Sent: {log}")
-        time.sleep(2)
+
+def main() -> None:
+    producer = create_producer()
+    while True:
+        for event_name, source_ip in LOGS:
+            event = SOCEvent.create_ingested(
+                event=event_name,
+                source_ip=source_ip,
+                user=None,
+                ground_truth=GroundTruthMetadata(
+                    synthetic=True,
+                    attack_label=event_name,
+                    generator="kafka/producer.py",
+                ),
+            )
+            publish_event(producer, "soc_logs", event)
+            print(f"Sent: {event.to_message()}", flush=True)
+            time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()

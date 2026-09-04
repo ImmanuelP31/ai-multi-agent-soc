@@ -12,8 +12,6 @@ from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from kafka import KafkaConsumer
-from sqlalchemy import func
 
 # =========================================================
 # LOCAL IMPORTS
@@ -23,12 +21,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.database import (
     init_db,
-    SessionLocal,
-    SocAlert,
 )
 
 from backend.routes import alerts as alerts_router
 from backend.routes import sequences as sequences_router
+from common.events import deserialize_event
+from common.kafka import consume_forever, create_consumer
 
 # =========================================================
 # OPTIONAL REDIS IMPORT
@@ -66,11 +64,6 @@ app.include_router(sequences_router.router)
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-
-KAFKA_BOOTSTRAP = os.environ.get(
-    "KAFKA_BOOTSTRAP_SERVERS",
-    "localhost:9094"
-)
 
 REDIS_CHANNEL = "live_alerts"
 
@@ -111,35 +104,25 @@ def kafka_to_redis_bridge():
 
     try:
 
-        consumer = KafkaConsumer(
+        consumer = create_consumer(
             "remediation_actions",
-            bootstrap_servers=KAFKA_BOOTSTRAP,
-            auto_offset_reset="latest",
-            value_deserializer=lambda m: json.loads(
-                m.decode("utf-8")
-            ),
+            "soc-live-alert-bridge",
+            offset_reset="latest",
         )
 
         print("[KAFKA] bridge connected")
 
-        for message in consumer:
-
-            alert = message.value
-
+        def handle(payload: dict) -> None:
+            event = deserialize_event(payload)
             r = get_redis()
-
             if not r:
-                continue
+                raise ConnectionError("Redis unavailable")
+            r.publish(
+                REDIS_CHANNEL,
+                json.dumps(event.to_message(), default=str)
+            )
 
-            try:
-
-                r.publish(
-                    REDIS_CHANNEL,
-                    json.dumps(alert, default=str)
-                )
-
-            except Exception as e:
-                print(f"[REDIS] publish failed: {e}")
+        consume_forever(consumer, handle, "live-alert-bridge")
 
     except Exception as e:
         print(f"[KAFKA] bridge failed: {e}")

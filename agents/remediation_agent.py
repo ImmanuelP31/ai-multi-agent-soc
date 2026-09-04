@@ -19,9 +19,7 @@ The simulation layer makes the intent clear while keeping the code testable.
 """
 
 import json
-import os
 import sys
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,8 +27,15 @@ _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from kafka import KafkaConsumer, KafkaProducer
-from backend.database import init_db, persist_alert
+from backend.database import init_db, persist_event
+from common.events import (
+    RemediationAction,
+    RemediationMetadata,
+    SOCEvent,
+    StageName,
+    deserialize_event,
+)
+from common.kafka import consume_forever, create_consumer, create_producer, publish_event
 
 # =========================================================
 # REMEDIATION LOG FILE
@@ -42,6 +47,15 @@ LOG_FILE = LOG_DIR / "remediation_actions.jsonl"   # one JSON object per line
 
 
 def write_remediation_log(record: dict) -> None:
+    event_id = record.get("event_id")
+    if event_id and LOG_FILE.exists():
+        with open(LOG_FILE) as existing:
+            for line in existing:
+                try:
+                    if json.loads(line).get("event_id") == event_id:
+                        return
+                except json.JSONDecodeError:
+                    continue
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(record, default=str) + "\n")
 
@@ -128,15 +142,15 @@ def _audit_log(event: str, ip: str) -> dict:
 # TIERED RESPONSE ENGINE
 # =========================================================
 
-def determine_actions(alert: dict) -> list[dict]:
+def determine_actions(event: SOCEvent) -> list[dict]:
     """
     Return a list of remediation actions based on severity,
     recommended_action from threat intel, and available fields.
     """
-    severity = alert.get("severity", "LOW")
-    ip       = alert.get("ip") or "unknown"
-    user     = alert.get("user") or "unknown"
-    event    = alert.get("event", "unknown")
+    severity = event.severity.value
+    ip       = event.source_ip or "unknown"
+    user     = event.user or "unknown"
+    event_name = event.event
     actions  = []
 
     if severity == "CRITICAL":
@@ -147,7 +161,7 @@ def determine_actions(alert: dict) -> list[dict]:
             "action": "ESCALATE_TO_ANALYST",
             "target": ip,
             "status": "triggered",
-            "note":   f"CRITICAL alert for '{event}' — paging on-call analyst.",
+            "note":   f"CRITICAL alert for '{event_name}' — paging on-call analyst.",
         })
 
     elif severity == "HIGH":
@@ -160,74 +174,78 @@ def determine_actions(alert: dict) -> list[dict]:
         actions.append(_increase_monitoring(ip))
 
     else:  # LOW
-        actions.append(_audit_log(event, ip))
+        actions.append(_audit_log(event_name, ip))
 
     return actions
 
 
-# =========================================================
-# KAFKA SETUP
-# =========================================================
+def process_event(event: SOCEvent) -> SOCEvent:
+    """Attach simulated response actions while preserving identity."""
 
-_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
+    actions = determine_actions(event)
+    enriched = event.model_copy(deep=True)
+    enriched.remediation = RemediationMetadata(
+        actions=[RemediationAction.model_validate(action) for action in actions],
+        remediated_at=datetime.now(timezone.utc),
+    )
+    return enriched.advance_stage(StageName.REMEDIATION, "remediation-agent")
 
-consumer = KafkaConsumer(
-    "threat_enriched_alerts",
-    bootstrap_servers=_bootstrap,
-    auto_offset_reset="earliest",
-    value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-)
 
-producer = KafkaProducer(
-    bootstrap_servers=_bootstrap,
-    value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
-)
-
-print("Remediation Agent Running...\n")
-init_db()
-
-# =========================================================
-# MAIN CONSUMER LOOP
-# =========================================================
-
-for message in consumer:
-
-    alert   = message.value
-    actions = determine_actions(alert)
-
-    # Attach remediation actions to alert
-    alert["remediation_actions"] = actions
-    alert["remediation_count"]   = len(actions)
-    alert["remediated_at"]       = datetime.now(timezone.utc).isoformat()
-
-    # Persist enriched alert to PostgreSQL
-    try:
-        persist_alert(alert)
-    except Exception as exc:
-        print(json.dumps({"storage_error": str(exc)}), file=sys.stderr, flush=True)
-
-    # Write structured remediation log
-    log_record = {
-        "timestamp": alert.get("remediated_at"),
-        "event":     alert.get("event"),
-        "severity":  alert.get("severity"),
-        "ip":        alert.get("ip"),
-        "user":      alert.get("user"),
-        "actions":   actions,
-        "mitre":     alert.get("mitre_attack"),
+def remediation_log_record(event: SOCEvent) -> dict:
+    return {
+        "event_id": str(event.event_id),
+        "incident_id": str(event.incident_id),
+        "timestamp": (
+            event.remediation.remediated_at.isoformat()
+            if event.remediation.remediated_at
+            else None
+        ),
+        "event": event.event,
+        "severity": event.severity.value,
+        "ip": event.source_ip,
+        "user": event.user,
+        "actions": [
+            action.model_dump(mode="json")
+            for action in event.remediation.actions
+        ],
+        "mitre": event.threat_intelligence.mitre_attack,
     }
-    write_remediation_log(log_record)
 
-    # Publish to Kafka for dashboard consumption
-    producer.send("remediation_actions", alert)
 
-    # Human-readable console output
+def print_actions(event: SOCEvent) -> None:
+    actions = event.remediation.actions
     print(f"\n{'='*50}")
-    print(f"[{alert.get('severity')}] {alert.get('event')} | IP: {alert.get('ip')}")
-    print(f"MITRE: {alert.get('mitre_attack', 'N/A')} | Tactic: {alert.get('mitre_tactic', 'N/A')}")
+    print(f"[{event.severity.value}] {event.event} | IP: {event.source_ip}")
+    print(
+        f"MITRE: {event.threat_intelligence.mitre_attack or 'N/A'} | "
+        f"Tactic: {event.threat_intelligence.mitre_tactic or 'N/A'}"
+    )
     print(f"Actions taken ({len(actions)}):")
-    for a in actions:
-        print(f"  → [{a['status'].upper()}] {a['action']} on {a.get('target', 'N/A')}")
-        if "command" in a:
-            print(f"     cmd: {a['command']}")
+    for action in actions:
+        print(
+            f"  [{action.status.upper()}] {action.action} "
+            f"on {action.target or 'N/A'}"
+        )
+        if action.command:
+            print(f"     cmd: {action.command}")
     print(f"{'='*50}\n", flush=True)
+
+
+def main() -> None:
+    consumer = create_consumer("threat_enriched_alerts", "soc-remediation")
+    producer = create_producer()
+    init_db()
+    print("Remediation Agent Running...\n")
+
+    def handle(payload: dict) -> None:
+        event = process_event(deserialize_event(payload))
+        persist_event(event)
+        write_remediation_log(remediation_log_record(event))
+        publish_event(producer, "remediation_actions", event)
+        print_actions(event)
+
+    consume_forever(consumer, handle, "remediation-agent")
+
+
+if __name__ == "__main__":
+    main()

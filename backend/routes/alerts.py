@@ -33,14 +33,26 @@ def get_alerts(limit: int = 100, skip: int = 0):
         return [
             {
                 "id": r.id,
+                "event_id": r.event_id,
+                "incident_id": r.incident_id,
+                "schema_version": r.schema_version,
                 "event": r.event,
                 "severity": r.severity,
-                "ip": r.ip,
+                "source_ip": r.source_ip or r.ip,
+                "ip": r.source_ip or r.ip,
                 "user": r.user,
                 "investigation": r.investigation,
+                "investigation_method": r.investigation_method,
                 "mitre_attack": r.mitre_attack,
                 "predicted_next_attack": r.predicted_next_attack,
                 "confidence": r.confidence,
+                "lstm_status": r.lstm_status,
+                "current_stage": r.current_stage,
+                "processing_version": r.processing_version,
+                "last_updated_at": (
+                    r.last_updated_at.isoformat()
+                    if r.last_updated_at else None
+                ),
                 "timestamp": (
                     r.timestamp.isoformat()
                     if r.timestamp else None

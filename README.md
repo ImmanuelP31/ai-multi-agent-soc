@@ -35,7 +35,7 @@ It is designed to demonstrate production-oriented engineering skills across dist
 Attack Simulator
       |
       v
-Kafka: soc_logs
+Kafka: soc_logs (keyed by source_ip)
       |
       v
 Detection Agent
@@ -43,26 +43,38 @@ Detection Agent
       v
 Kafka: soc_alerts
       |
-      +--> Investigation Agent
-      |          |
-      |          v
-      |   Kafka: investigated_alerts
+      v
+Investigation Agent -> Kafka: investigated_alerts
       |
-      +--> Threat Intel Agent
-      |          |
-      |          v
-      |   Kafka: threat_enriched_alerts
+      v
+Threat Intel Agent -> Kafka: threat_enriched_alerts
       |
-      +--> Remediation Agent
-                 |
-                 v
-          Kafka: remediation_actions
-                 |
-                 +--> PostgreSQL
-                 +--> Redis pub/sub
-                 +--> FastAPI WebSocket
-                 +--> React Dashboard
+      v
+Remediation Agent -> Kafka: remediation_actions
+      |
+      +--> Reporting Agent
+      +--> PostgreSQL (one progressively enriched row)
+      +--> Redis pub/sub -> FastAPI WebSocket -> React Dashboard
 ```
+
+Every message uses the canonical Pydantic contract in `common/events.py`.
+The simulator creates `event_id` and `incident_id` once; every downstream
+agent validates and preserves both values. Messages are keyed by `source_ip`
+(falling back to `incident_id`) and each agent uses its own stable consumer
+group with manual offset commits. An offset is committed only after the
+database upsert, required local output, and downstream Kafka publication
+succeed.
+
+PostgreSQL enforces a unique index on `event_id`. Detection, investigation,
+threat intelligence, remediation, and reporting update that same incident row
+with nested metadata and the current processing stage, so Kafka retries enrich
+the existing incident instead of inserting duplicates.
+
+The active topic chain is `soc_logs` (`soc-detection`), `soc_alerts`
+(`soc-investigation`), `investigated_alerts` (`soc-threat-intel`),
+`threat_enriched_alerts` (`soc-remediation`), and `remediation_actions`
+(`soc-reporting`). The optional existing sequence worker publishes canonical
+correlations to `sequence_alerts` under its `soc-sequence` consumer group.
 
 ## Tech Stack
 
@@ -82,6 +94,7 @@ Kafka: soc_alerts
 ai-multi-agent-soc/
 ├── agents/                 # Detection, investigation, intel, remediation, reporting agents
 ├── backend/                # FastAPI app, database models, alert routes, WebSocket stream
+├── common/                 # Canonical event contract and replay-safe Kafka helpers
 ├── frontend/               # React SOC dashboard
 ├── kafka/                  # Kafka producer and consumer helpers
 ├── ml/                     # Training and sequence detection workflows
@@ -216,6 +229,12 @@ Run backend syntax checks:
 
 ```bash
 python -m py_compile backend/main.py backend/database.py backend/routes/alerts.py
+```
+
+Run pipeline unit tests:
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
 Follow useful logs:

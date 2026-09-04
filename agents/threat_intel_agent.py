@@ -13,7 +13,6 @@ instead of returning a blank "Unknown Technique".
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -21,7 +20,14 @@ _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from kafka import KafkaConsumer, KafkaProducer
+from backend.database import init_db, persist_event
+from common.events import (
+    SOCEvent,
+    StageName,
+    ThreatIntelligenceMetadata,
+    deserialize_event,
+)
+from common.kafka import consume_forever, create_consumer, create_producer, publish_event
 
 # =========================================================
 # MITRE ATT&CK KNOWLEDGE BASE
@@ -220,43 +226,42 @@ def lookup_mitre(event: str, predicted_attack: str | None = None) -> dict:
     return UNKNOWN_TECHNIQUE.copy()
 
 
-# =========================================================
-# KAFKA SETUP
-# =========================================================
+def process_event(event: SOCEvent) -> SOCEvent:
+    """Attach MITRE context while preserving canonical identity."""
 
-_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
+    intel = lookup_mitre(
+        event.event,
+        event.investigation_metadata.predicted_next_attack,
+    )
+    enriched = event.model_copy(deep=True)
+    enriched.threat_intelligence = ThreatIntelligenceMetadata(
+        mitre_attack=intel["technique"],
+        mitre_tactic=intel["tactic"],
+        confidence=intel["confidence"],
+        recommended_action=intel["action"],
+        method=(
+            "exact_match"
+            if "note" not in intel
+            else intel.get("note", "fuzzy")
+        ),
+    )
+    return enriched.advance_stage(StageName.THREAT_INTEL, "threat-intel-agent")
 
-consumer = KafkaConsumer(
-    "investigated_alerts",
-    bootstrap_servers=_bootstrap,
-    auto_offset_reset="earliest",
-    value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-)
 
-producer = KafkaProducer(
-    bootstrap_servers=_bootstrap,
-    value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
-)
+def main() -> None:
+    consumer = create_consumer("investigated_alerts", "soc-threat-intel")
+    producer = create_producer()
+    init_db()
+    print("Threat Intelligence Agent Running...\n")
 
-print("Threat Intelligence Agent Running...\n")
+    def handle(payload: dict) -> None:
+        event = process_event(deserialize_event(payload))
+        persist_event(event)
+        publish_event(producer, "threat_enriched_alerts", event)
+        print(json.dumps(event.to_message(), default=str), flush=True)
 
-# =========================================================
-# MAIN CONSUMER LOOP
-# =========================================================
+    consume_forever(consumer, handle, "threat-intel-agent")
 
-for message in consumer:
 
-    alert            = message.value
-    event            = alert.get("event", "unknown")
-    predicted_attack = alert.get("predicted_next_attack")
-
-    intel = lookup_mitre(event, predicted_attack)
-
-    alert["mitre_attack"]          = intel["technique"]
-    alert["mitre_tactic"]          = intel["tactic"]
-    alert["mitre_confidence"]      = intel["confidence"]
-    alert["recommended_action"]    = intel["action"]
-    alert["threat_intel_method"]   = "exact_match" if "note" not in intel else intel.get("note", "fuzzy")
-
-    producer.send("threat_enriched_alerts", alert)
-    print(json.dumps(alert, default=str), flush=True)
+if __name__ == "__main__":
+    main()

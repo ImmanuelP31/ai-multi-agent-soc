@@ -1,17 +1,26 @@
-from kafka import KafkaConsumer
-import json
-import os
+"""Replay-safe local observer for canonical ingestion events."""
 
-_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
+from pathlib import Path
+import sys
 
-consumer = KafkaConsumer(
-    'soc_logs',
-    bootstrap_servers=_bootstrap,
-    auto_offset_reset='earliest',
-    value_deserializer=lambda m: json.loads(m.decode('utf-8'))
-)
+_repo_root = Path(__file__).resolve().parents[1]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
-print("Listening for SOC logs...")
+from common.events import deserialize_event
+from common.kafka import consume_forever, create_consumer
 
-for message in consumer:
-    print(f"Received: {message.value}")
+
+def main() -> None:
+    consumer = create_consumer("soc_logs", "soc-log-observer")
+    print("Listening for SOC logs...")
+
+    def handle(payload: dict) -> None:
+        event = deserialize_event(payload)
+        print(f"Received: {event.to_message()}", flush=True)
+
+    consume_forever(consumer, handle, "soc-log-observer")
+
+
+if __name__ == "__main__":
+    main()
