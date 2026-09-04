@@ -62,12 +62,24 @@ class DetectionMetadata(ContractModel):
     failed_login_count: int | None = None
 
 
+class SequencePredictionCandidate(ContractModel):
+    rank: int = Field(ge=1)
+    attack_class: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class InvestigationMetadata(ContractModel):
     summary: str | None = None
     method: str | None = None
     predicted_next_attack: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     model_status: str | None = None
+    top_predictions: list[SequencePredictionCandidate] = Field(default_factory=list)
+    sequence_length_used: int | None = Field(default=None, ge=0)
+    model_version: str | None = None
+    prediction_timestamp: datetime | None = None
+    sequence_state_backend: str | None = None
+    sequence_state_status: str | None = None
 
 
 class ThreatIntelligenceMetadata(ContractModel):

@@ -24,7 +24,6 @@ from backend.database import (
 )
 
 from backend.routes import alerts as alerts_router
-from backend.routes import sequences as sequences_router
 from common.events import deserialize_event
 from common.kafka import consume_forever, create_consumer
 
@@ -56,7 +55,6 @@ app.add_middleware(
 # =========================================================
 
 app.include_router(alerts_router.router)
-app.include_router(sequences_router.router)
 
 # =========================================================
 # CONFIG

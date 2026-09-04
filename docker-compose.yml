@@ -92,7 +92,6 @@ services:
       kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic investigated_alerts    --partitions 1 --replication-factor 1
       kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic threat_enriched_alerts --partitions 1 --replication-factor 1
       kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic remediation_actions    --partitions 1 --replication-factor 1
-      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic sequence_alerts        --partitions 1 --replication-factor 1
       echo 'All topics created.'
       "
     restart: "no"
@@ -154,11 +153,16 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - .:/app
     environment:
       DATABASE_URL: postgresql://socuser:socpass@postgres:5432/socdb
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      SEQUENCE_STATE_TTL_SECONDS: "3600"
     restart: on-failure
 
   threat-intel-agent:

@@ -1,13 +1,11 @@
-"""Enrich canonical SOC events with trained LSTM sequence predictions."""
+"""Enrich canonical SOC events through the durable sequence predictor."""
 
 from __future__ import annotations
 
-from collections import deque
 import json
+import os
 from pathlib import Path
 import sys
-
-import numpy as np
 
 _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
@@ -17,95 +15,18 @@ from backend.database import init_db, persist_event
 from common.events import (
     InvestigationMetadata,
     SOCEvent,
+    SequencePredictionCandidate,
     StageName,
     deserialize_event,
 )
-from common.kafka import consume_forever, create_consumer, create_producer, publish_event
-from ml.sequence_detection.pipeline import (
-    SEQUENCE_FEATURES,
-    SEQUENCE_LENGTH as DEFAULT_SEQUENCE_LENGTH,
-    load_preprocessor,
-    validate_metadata,
+from ml.sequence_detection.predictor import (
+    DEFAULT_STATE_TTL_SECONDS,
+    SequencePredictor,
 )
 
 
-_seq_dir = _repo_root / "ml" / "sequence_detection"
-MODEL_AVAILABLE = False
-MODEL_STATUS = "not_loaded"
-MODEL_ERROR_MESSAGE = ""
-lstm_model = None
-sequence_preprocessor = None
-LABEL_MAPPING: dict[int, str] = {}
-SEQUENCE_LENGTH = DEFAULT_SEQUENCE_LENGTH
-NUM_FEATURES = len(SEQUENCE_FEATURES)
-
-_meta_path = _seq_dir / "metadata.json"
-if _meta_path.exists():
-    with open(_meta_path) as file:
-        metadata = json.load(file)
-    SEQUENCE_LENGTH = metadata.get("sequence_length", DEFAULT_SEQUENCE_LENGTH)
-    NUM_FEATURES = metadata.get("num_features", len(SEQUENCE_FEATURES))
-else:
-    metadata = {}
-    print("metadata.json not found; using sequence defaults")
-
-_label_path = _seq_dir / "label_mapping.json"
-if _label_path.exists():
-    with open(_label_path) as file:
-        raw_mapping = json.load(file)
-    LABEL_MAPPING = {int(value): key for key, value in raw_mapping.items()}
-else:
-    print("label_mapping.json not found; predictions will use class indexes")
-
-_model_path = _seq_dir / "sequence_model.keras"
-_preprocessor_path = _seq_dir / "sequence_preprocessor.joblib"
-if metadata.get("status") != "trained":
-    MODEL_STATUS = "requires_retraining"
-    MODEL_ERROR_MESSAGE = (
-        "The leakage-free sequence model has not been trained. Expected "
-        f"artifacts: {_model_path} and {_preprocessor_path}. Run "
-        "ml/sequence_detection/generate_rich_sequences.py followed by "
-        "ml/sequence_detection/train_lstm_model.py, or add compatible "
-        "artifacts manually, then restart the investigation agent."
-    )
-elif _model_path.exists() and _preprocessor_path.exists():
-    try:
-        from tensorflow.keras.models import load_model  # type: ignore
-
-        validate_metadata(metadata, {name: index for index, name in LABEL_MAPPING.items()})
-        sequence_preprocessor = load_preprocessor(_preprocessor_path)
-        lstm_model = load_model(str(_model_path))
-        actual_shape = lstm_model.input_shape
-        expected_shape = (None, SEQUENCE_LENGTH, NUM_FEATURES)
-        if actual_shape != expected_shape:
-            MODEL_STATUS = "shape_mismatch"
-            MODEL_ERROR_MESSAGE = (
-                f"Sequence model expects {actual_shape}; metadata expects "
-                f"{expected_shape}. Replace {_model_path}."
-            )
-        else:
-            MODEL_AVAILABLE = True
-            MODEL_STATUS = "loaded"
-            print("LSTM sequence model loaded successfully\n")
-    except Exception as exc:
-        MODEL_STATUS = "load_error"
-        MODEL_ERROR_MESSAGE = f"Could not load {_model_path}: {exc}"
-else:
-    MODEL_STATUS = "missing_model_artifacts"
-    missing = [
-        str(path)
-        for path in (_model_path, _preprocessor_path)
-        if not path.exists()
-    ]
-    MODEL_ERROR_MESSAGE = (
-        f"Trained sequence artifacts are missing: {', '.join(missing)}. Add "
-        "compatible artifacts manually or run the sequence generation and "
-        "training scripts, then restart the investigation agent."
-    )
-
-if not MODEL_AVAILABLE:
-    print(f"WARNING: {MODEL_ERROR_MESSAGE}\n")
-
+SEQUENCE_ARTIFACT_DIR = _repo_root / "ml" / "sequence_detection"
+sequence_predictor: SequencePredictor | None = None
 
 ATTACK_CONTEXT = {
     "BENIGN": "No malicious pattern detected in the recent sequence.",
@@ -135,83 +56,101 @@ def get_context(attack_name: str) -> str:
     return f"Unknown predicted attack '{attack_name}'; manual review is required."
 
 
-ip_windows: dict[str, deque[tuple[str, list[float]]]] = {}
+def create_runtime_predictor() -> SequencePredictor:
+    import redis
 
-
-def get_feature_vector(event: SOCEvent) -> list[float]:
-    if sequence_preprocessor is None:
-        raise RuntimeError("Sequence preprocessor is not loaded")
-    transformed = sequence_preprocessor.transform_telemetry(
-        event.telemetry.flow_features
+    redis_host = os.environ.get("REDIS_HOST", "localhost")
+    redis_port = int(os.environ.get("REDIS_PORT", 6379))
+    ttl_seconds = int(
+        os.environ.get("SEQUENCE_STATE_TTL_SECONDS", DEFAULT_STATE_TTL_SECONDS)
     )
-    return transformed[0].tolist()
-
-
-def update_window(event: SOCEvent) -> list[list[float]]:
-    source = event.source_ip or str(event.incident_id)
-    if source not in ip_windows:
-        ip_windows[source] = deque(maxlen=SEQUENCE_LENGTH)
-    window = ip_windows[source]
-    event_id = str(event.event_id)
-    if not any(existing_id == event_id for existing_id, _ in window):
-        window.append((event_id, get_feature_vector(event)))
-    return [vector for _, vector in window]
-
-
-def predict_next_attack(window: list[list[float]]) -> tuple[str, float]:
-    if len(window) != SEQUENCE_LENGTH:
-        raise ValueError(f"Expected {SEQUENCE_LENGTH} events, received {len(window)}")
-    values = np.array(window, dtype=np.float32).reshape(
-        1, SEQUENCE_LENGTH, NUM_FEATURES
+    redis_client = redis.Redis(
+        host=redis_host,
+        port=redis_port,
+        decode_responses=True,
+        socket_connect_timeout=2,
+        socket_timeout=5,
     )
-    probabilities = lstm_model.predict(values, verbose=0)[0]
-    index = int(np.argmax(probabilities))
-    return LABEL_MAPPING.get(index, f"class_{index}"), float(probabilities[index])
+    try:
+        redis_client.ping()
+    except Exception as exc:
+        raise ConnectionError(
+            f"Redis sequence state is unavailable at {redis_host}:{redis_port}: {exc}"
+        ) from exc
+    return SequencePredictor.from_artifacts(
+        redis_client,
+        SEQUENCE_ARTIFACT_DIR,
+        ttl_seconds=ttl_seconds,
+    )
 
 
-def process_event(event: SOCEvent) -> SOCEvent:
-    """Apply sequence investigation while preserving canonical identity."""
+def process_event(
+    event: SOCEvent,
+    predictor: SequencePredictor | None = None,
+) -> SOCEvent:
+    """Delegate sequence inference and preserve the canonical event identity."""
 
-    source = event.source_ip or str(event.incident_id)
-    if MODEL_AVAILABLE:
-        window = update_window(event)
-        if len(window) == SEQUENCE_LENGTH:
-            predicted_attack, confidence = predict_next_attack(window)
-            context = get_context(predicted_attack)
+    runtime = predictor or sequence_predictor
+    if runtime is None:
+        metadata = InvestigationMetadata(
+            summary="Sequence predictor is not initialized; no prediction was generated.",
+            method="lstm_sequence_model_unavailable",
+            model_status="not_initialized",
+            sequence_state_backend="redis",
+            sequence_state_status="not_initialized",
+        )
+    else:
+        outcome = runtime.predict(event)
+        candidates = [
+            SequencePredictionCandidate(
+                rank=item.rank,
+                attack_class=item.attack_class,
+                confidence=round(item.confidence, 6),
+            )
+            for item in outcome.top_predictions
+        ]
+        if outcome.status == "predicted":
+            context = get_context(outcome.predicted_class or "unknown")
             metadata = InvestigationMetadata(
                 summary=(
-                    f"{context} LSTM predicted '{predicted_attack}' with "
-                    f"{confidence * 100:.1f}% confidence from the last "
-                    f"{len(window)} events for {source}."
+                    f"{context} LSTM predicted '{outcome.predicted_class}' with "
+                    f"{(outcome.confidence or 0.0) * 100:.1f}% confidence from "
+                    f"{outcome.sequence_length_used} durable events."
                 ),
                 method="lstm_sequence_model",
-                predicted_next_attack=predicted_attack,
-                confidence=round(confidence, 4),
-                model_status=MODEL_STATUS,
+                predicted_next_attack=outcome.predicted_class,
+                confidence=round(outcome.confidence or 0.0, 6),
+                model_status=outcome.model_status,
+                top_predictions=candidates,
+                sequence_length_used=outcome.sequence_length_used,
+                model_version=outcome.model_version,
+                prediction_timestamp=outcome.predicted_at,
+                sequence_state_backend=outcome.state_backend,
+                sequence_state_status=outcome.state_status,
+            )
+        elif outcome.status == "warming_up":
+            metadata = InvestigationMetadata(
+                summary=f"{outcome.detail} No prediction was generated.",
+                method="lstm_sequence_model_warming_up",
+                model_status=outcome.model_status,
+                sequence_length_used=outcome.sequence_length_used,
+                model_version=outcome.model_version,
+                sequence_state_backend=outcome.state_backend,
+                sequence_state_status=outcome.state_status,
             )
         else:
             metadata = InvestigationMetadata(
                 summary=(
-                    f"Collecting telemetry history for {source}: {len(window)}/"
-                    f"{SEQUENCE_LENGTH} events. No prediction was generated."
+                    "Next-attack prediction unavailable because the trained LSTM "
+                    f"model is not loaded. Status: '{outcome.model_status}'. "
+                    f"{outcome.detail}"
                 ),
-                method="lstm_sequence_model_warming_up",
-                predicted_next_attack=None,
-                confidence=None,
-                model_status="warming_up",
+                method="lstm_sequence_model_unavailable",
+                model_status=outcome.model_status,
+                model_version=outcome.model_version,
+                sequence_state_backend=outcome.state_backend,
+                sequence_state_status=outcome.state_status,
             )
-    else:
-        metadata = InvestigationMetadata(
-            summary=(
-                "Next-attack prediction unavailable because the trained LSTM "
-                f"model is not loaded. Status: '{MODEL_STATUS}'. "
-                f"{MODEL_ERROR_MESSAGE}"
-            ),
-            method="lstm_sequence_model_unavailable",
-            predicted_next_attack=None,
-            confidence=None,
-            model_status=MODEL_STATUS,
-        )
 
     enriched = event.model_copy(deep=True)
     enriched.investigation_metadata = metadata
@@ -219,9 +158,31 @@ def process_event(event: SOCEvent) -> SOCEvent:
 
 
 def main() -> None:
+    global sequence_predictor
+
+    from common.kafka import (
+        consume_forever,
+        create_consumer,
+        create_producer,
+        publish_event,
+    )
+
+    init_db()
+    sequence_predictor = create_runtime_predictor()
+    if sequence_predictor.available:
+        print(
+            "Investigation sequence predictor ready "
+            f"(Redis TTL={sequence_predictor.store.ttl_seconds}s)"
+        )
+    else:
+        print(
+            "WARNING: Next-attack prediction unavailable: "
+            f"{sequence_predictor.model_status}: "
+            f"{sequence_predictor.unavailable_detail}"
+        )
+
     consumer = create_consumer("soc_alerts", "soc-investigation")
     producer = create_producer()
-    init_db()
     print("Investigation Agent Running...\n")
 
     def handle(payload: dict) -> None:

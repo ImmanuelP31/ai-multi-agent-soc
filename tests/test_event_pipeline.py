@@ -60,14 +60,8 @@ class CanonicalEventTests(unittest.TestCase):
 
 class PipelineIdentityTests(unittest.TestCase):
     def setUp(self):
-        self.old_investigation_model_status = investigation_agent.MODEL_AVAILABLE
-        investigation_agent.MODEL_AVAILABLE = False
         detection_agent.failed_login_counter.clear()
         detection_agent.failed_login_results.clear()
-        investigation_agent.ip_windows.clear()
-
-    def tearDown(self):
-        investigation_agent.MODEL_AVAILABLE = self.old_investigation_model_status
 
     def test_identity_survives_every_processing_stage(self):
         original = sample_event()
@@ -128,9 +122,6 @@ class PipelineIdentityTests(unittest.TestCase):
 
 class IdempotentPersistenceTests(unittest.TestCase):
     def setUp(self):
-        self.old_investigation_model_status = investigation_agent.MODEL_AVAILABLE
-        investigation_agent.MODEL_AVAILABLE = False
-        investigation_agent.ip_windows.clear()
         self.old_engine = database._engine
         self.old_session_local = database.SessionLocal
         self.engine = create_engine(
@@ -150,7 +141,6 @@ class IdempotentPersistenceTests(unittest.TestCase):
         self.engine.dispose()
         database._engine = self.old_engine
         database.SessionLocal = self.old_session_local
-        investigation_agent.MODEL_AVAILABLE = self.old_investigation_model_status
 
     def test_duplicate_delivery_updates_one_incident_row(self):
         event = sample_event()

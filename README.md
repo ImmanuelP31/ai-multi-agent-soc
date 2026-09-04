@@ -44,7 +44,7 @@ Detection Agent
 Kafka: soc_alerts
       |
       v
-Investigation Agent -> Kafka: investigated_alerts
+Investigation Agent -> Redis sequence window -> Kafka: investigated_alerts
       |
       v
 Threat Intel Agent -> Kafka: threat_enriched_alerts
@@ -73,8 +73,8 @@ the existing incident instead of inserting duplicates.
 The active topic chain is `soc_logs` (`soc-detection`), `soc_alerts`
 (`soc-investigation`), `investigated_alerts` (`soc-threat-intel`),
 `threat_enriched_alerts` (`soc-remediation`), and `remediation_actions`
-(`soc-reporting`). The optional existing sequence worker publishes canonical
-correlations to `sequence_alerts` under its `soc-sequence` consumer group.
+(`soc-reporting`). Sequence prediction exists only inside Investigation; there
+is no second sequence consumer or parallel prediction topic.
 
 ## Tech Stack
 
@@ -83,9 +83,9 @@ correlations to `sequence_alerts` under its `soc-sequence` consumer group.
 | Frontend | React, Vite, Tailwind CSS, Recharts, Framer Motion |
 | Backend | FastAPI, SQLAlchemy, WebSockets |
 | Streaming | Apache Kafka, Zookeeper |
-| Realtime | Redis pub/sub |
+| Realtime | Redis pub/sub and durable sequence windows |
 | Database | PostgreSQL |
-| ML | scikit-learn, XGBoost, LightGBM, NumPy, Pandas |
+| ML | scikit-learn, TensorFlow, NumPy, Pandas |
 | DevOps | Docker, Docker Compose |
 
 ## Repository Layout
@@ -238,6 +238,15 @@ after five telemetry events from the same source. If either artifact is absent
 or retraining is required, no rule-based next-attack prediction is substituted;
 alerts show `investigation_method: lstm_sequence_model_unavailable` and include
 the exact `lstm_status`.
+
+At runtime, Investigation stores each source identity in a separate bounded
+Redis list named `soc:sequence:<source-ip>`. Lists retain at most the configured
+sequence length and default to a one-hour TTL. State therefore survives agent
+restarts without allowing two source IPs to share a window. Redis failure stops
+processing and leaves the Kafka offset uncommitted for retry; it never falls
+back to an incomplete in-memory sequence. Successful predictions persist the
+top classes, primary confidence, sequence length, model version, and prediction
+timestamp in the alert's investigation metadata.
 
 ## Dashboard Features
 

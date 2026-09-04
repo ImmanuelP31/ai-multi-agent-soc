@@ -52,11 +52,24 @@ def get_alerts(limit: int = 100, skip: int = 0):
                     (r.detection_metadata or {}).get("model_status")
                 ),
                 "investigation": r.investigation,
+                "investigation_metadata": r.investigation_metadata,
                 "investigation_method": r.investigation_method,
                 "mitre_attack": r.mitre_attack,
                 "predicted_next_attack": r.predicted_next_attack,
                 "confidence": r.confidence,
                 "lstm_status": r.lstm_status,
+                "top_predictions": (
+                    (r.investigation_metadata or {}).get("top_predictions", [])
+                ),
+                "sequence_length_used": (
+                    (r.investigation_metadata or {}).get("sequence_length_used")
+                ),
+                "sequence_model_version": (
+                    (r.investigation_metadata or {}).get("model_version")
+                ),
+                "prediction_timestamp": (
+                    (r.investigation_metadata or {}).get("prediction_timestamp")
+                ),
                 "current_stage": r.current_stage,
                 "processing_version": r.processing_version,
                 "last_updated_at": (
