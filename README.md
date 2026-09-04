@@ -93,7 +93,8 @@ is no second sequence consumer or parallel prediction topic.
 ```text
 ai-multi-agent-soc/
 ├── agents/                 # Detection, investigation, intel, remediation, reporting agents
-├── backend/                # FastAPI app, database models, alert routes, WebSocket stream
+├── alembic/                # Versioned PostgreSQL schema migrations
+├── backend/                # FastAPI app, canonical incident model, API and WebSocket stream
 ├── common/                 # Canonical event contract and replay-safe Kafka helpers
 ├── frontend/               # React SOC dashboard
 ├── kafka/                  # Kafka producer and consumer helpers
@@ -119,7 +120,9 @@ cd ai-multi-agent-soc
 docker compose up -d --build
 ```
 
-This starts PostgreSQL, Redis, Zookeeper, Kafka, the FastAPI backend, and all SOC agents.
+This starts PostgreSQL, runs `alembic upgrade head`, and then starts Redis,
+Zookeeper, Kafka, the FastAPI backend, and all SOC agents. Backend and agent
+containers start only after the migration succeeds.
 
 Check service status:
 
@@ -269,6 +272,24 @@ timestamp in the alert's investigation metadata.
 
 ## Development Commands
 
+Apply database migrations without starting the full stack:
+
+```bash
+docker compose run --rm migrate
+```
+
+For a local Python environment with `DATABASE_URL` configured, the equivalent
+commands are:
+
+```bash
+alembic upgrade head
+alembic current
+```
+
+Create schema changes as new Alembic revisions. Runtime services only verify
+database connectivity; they do not call `create_all()` or repair tables with
+ad-hoc `ALTER TABLE` statements.
+
 Run frontend checks:
 
 ```bash
@@ -307,7 +328,7 @@ docker compose down
 
 - Building an event-driven system with multiple independently running workers.
 - Designing a backend that serves both REST analytics and WebSocket updates.
-- Persisting and repairing evolving database schema safely during local development.
+- Evolving a replay-safe PostgreSQL incident schema through versioned Alembic migrations.
 - Connecting ML-driven detection outputs to a real-time analyst dashboard.
 - Packaging a complex system into a repeatable Docker Compose workflow.
 - Presenting technical work with a clean, recruiter-friendly frontend experience.

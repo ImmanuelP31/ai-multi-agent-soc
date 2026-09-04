@@ -135,7 +135,7 @@ class IdempotentPersistenceTests(unittest.TestCase):
             autoflush=False,
             autocommit=False,
         )
-        database.Base.metadata.create_all(self.engine)
+        database.create_test_schema(self.engine)
 
     def tearDown(self):
         self.engine.dispose()
@@ -153,7 +153,7 @@ class IdempotentPersistenceTests(unittest.TestCase):
 
         session = database.SessionLocal()
         try:
-            rows = session.query(database.SocAlert).all()
+            rows = session.query(database.Incident).all()
             self.assertEqual(len(rows), 1)
             self.assertEqual(first_id, second_id)
             self.assertEqual(second_id, third_id)
@@ -174,7 +174,7 @@ class IdempotentPersistenceTests(unittest.TestCase):
 
         session = database.SessionLocal()
         try:
-            row = session.query(database.SocAlert).one()
+            row = session.query(database.Incident).one()
             self.assertEqual(row.current_stage, StageName.INVESTIGATION.value)
             self.assertIsNotNone(row.investigation_metadata)
             self.assertEqual(

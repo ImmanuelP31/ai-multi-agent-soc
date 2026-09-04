@@ -132,7 +132,7 @@ def kafka_to_redis_bridge():
 @app.on_event("startup")
 def startup():
 
-    print("[STARTUP] Initializing database")
+    print("[STARTUP] Verifying migrated database connection")
 
     init_db()
 

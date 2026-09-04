@@ -34,6 +34,18 @@ services:
       timeout: 3s
       retries: 5
 
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    environment:
+      DATABASE_URL: postgresql://socuser:socpass@postgres:5432/socdb
+    restart: "no"
+
   zookeeper:
     image: bitnamilegacy/zookeeper:3.9.3-debian-12-r22
     container_name: ai_soc_zookeeper
@@ -106,8 +118,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       kafka:
@@ -133,8 +145,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - .:/app
     environment:
@@ -151,8 +163,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     volumes:
@@ -172,8 +184,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - .:/app
     environment:
@@ -188,8 +200,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - .:/app
     environment:
@@ -204,8 +216,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - .:/app
     environment:

@@ -7,6 +7,12 @@ router = APIRouter(
     tags=["Alerts"]
 )
 
+
+def combined_mitre_technique(row: db.Incident) -> str | None:
+    if row.mitre_technique_id and row.mitre_technique_name:
+        return f"{row.mitre_technique_id} - {row.mitre_technique_name}"
+    return row.mitre_technique_id or row.mitre_technique_name
+
 # =========================================================
 # ALERTS
 # =========================================================
@@ -23,8 +29,8 @@ def get_alerts(limit: int = 100, skip: int = 0):
     try:
 
         rows = (
-            session.query(db.SocAlert)
-            .order_by(db.SocAlert.id.desc())
+            session.query(db.Incident)
+            .order_by(db.Incident.observed_at.desc(), db.Incident.id.desc())
             .offset(skip)
             .limit(limit)
             .all()
@@ -38,26 +44,28 @@ def get_alerts(limit: int = 100, skip: int = 0):
                 "schema_version": r.schema_version,
                 "event": r.event,
                 "severity": r.severity,
-                "source_ip": r.source_ip or r.ip,
-                "ip": r.source_ip or r.ip,
+                "source_ip": r.source_ip,
+                "ip": r.source_ip,
                 "user": r.user,
                 "detection": r.detection_metadata,
-                "detection_method": (
-                    (r.detection_metadata or {}).get("method")
-                ),
-                "anomaly_score": (
-                    (r.detection_metadata or {}).get("anomaly_score")
-                ),
+                "detection_method": r.detection_method,
+                "anomaly_score": r.anomaly_score,
                 "detection_model_status": (
                     (r.detection_metadata or {}).get("model_status")
                 ),
                 "investigation": r.investigation,
                 "investigation_metadata": r.investigation_metadata,
                 "investigation_method": r.investigation_method,
-                "mitre_attack": r.mitre_attack,
+                "mitre_attack": combined_mitre_technique(r),
+                "mitre_technique_id": r.mitre_technique_id,
+                "mitre_technique_name": r.mitre_technique_name,
+                "mitre_tactic": r.mitre_tactic,
+                "mitre_confidence": r.mitre_confidence,
+                "recommended_action": r.recommended_action,
+                "threat_intel_method": r.threat_intelligence_method,
                 "predicted_next_attack": r.predicted_next_attack,
-                "confidence": r.confidence,
-                "lstm_status": r.lstm_status,
+                "confidence": r.prediction_confidence,
+                "lstm_status": r.sequence_model_status,
                 "top_predictions": (
                     (r.investigation_metadata or {}).get("top_predictions", [])
                 ),
@@ -72,13 +80,15 @@ def get_alerts(limit: int = 100, skip: int = 0):
                 ),
                 "current_stage": r.current_stage,
                 "processing_version": r.processing_version,
+                "remediation_actions": r.remediation_actions or [],
+                "created_at": r.created_at.isoformat(),
                 "last_updated_at": (
-                    r.last_updated_at.isoformat()
-                    if r.last_updated_at else None
+                    r.updated_at.isoformat()
+                    if r.updated_at else None
                 ),
                 "timestamp": (
-                    r.timestamp.isoformat()
-                    if r.timestamp else None
+                    r.observed_at.isoformat()
+                    if r.observed_at else None
                 ),
             }
             for r in rows
@@ -101,16 +111,16 @@ def get_stats():
     try:
 
         total = (
-            session.query(func.count(db.SocAlert.id))
+            session.query(func.count(db.Incident.id))
             .scalar() or 0
         )
 
         severity_rows = (
             session.query(
-                db.SocAlert.severity,
-                func.count(db.SocAlert.id),
+                db.Incident.severity,
+                func.count(db.Incident.id),
             )
-            .group_by(db.SocAlert.severity)
+            .group_by(db.Incident.severity)
             .all()
         )
 
@@ -136,9 +146,9 @@ def get_stats():
         ]
 
         malware_count = (
-            session.query(func.count(db.SocAlert.id))
+            session.query(func.count(db.Incident.id))
             .filter(
-                db.SocAlert.event.ilike("%malware%")
+                db.Incident.event.ilike("%malware%")
             )
             .scalar() or 0
         )
