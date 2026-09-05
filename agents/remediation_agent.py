@@ -365,7 +365,7 @@ def remediation_log_record(event: SOCEvent) -> dict:
         "results": [
             result.model_dump(mode="json") for result in event.remediation.results
         ],
-        "mitre": event.threat_intelligence.mitre_attack,
+        "mitre": event.threat_intelligence.model_dump(mode="json"),
     }
 
 
@@ -374,8 +374,9 @@ def print_actions(event: SOCEvent) -> None:
     print(f"\n{'=' * 50}")
     print(f"[{event.severity.value}] {event.event} | IP: {event.source_ip}")
     print(
-        f"MITRE: {event.threat_intelligence.mitre_attack or 'N/A'} | "
-        f"Tactic: {event.threat_intelligence.mitre_tactic or 'N/A'}"
+        f"MITRE: {event.threat_intelligence.technique_id or 'N/A'} "
+        f"{event.threat_intelligence.technique_name or ''} | "
+        f"Tactic: {event.threat_intelligence.tactic or 'N/A'}"
     )
     print(f"Actions evaluated ({len(actions)}):")
     for action in actions:

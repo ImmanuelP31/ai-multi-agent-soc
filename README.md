@@ -247,7 +247,7 @@ timestamp in the alert's investigation metadata.
 
 ## Remediation Safety Model
 
-Remediation remains simulation-only. Canonical schema `1.1` accepts only
+Remediation remains simulation-only. Canonical schema `1.2` accepts only
 the typed actions `BLOCK_IP`, `RATE_LIMIT_IP`, `ISOLATE_USER`,
 `FLAG_USER_FOR_REVIEW`, `INCREASE_MONITORING`, `AUDIT_LOG`, and
 `ESCALATE_TO_ANALYST`. Each action has a deterministic ID derived from the
@@ -274,6 +274,21 @@ after an exact MITRE match with confidence of at least 0.90 corroborates an
 Impact or Privilege Escalation tactic, or after at least ten observed failed
 logins corroborate Credential Access. Fuzzy or predicted labels cannot trigger
 the promotion.
+
+## ATT&CK Enrichment
+
+The Threat Intelligence Agent uses the repository-local mapping version
+`2026-09-project-v1`. This identifies this project's small mapping table; it is
+not an official MITRE ATT&CK release identifier. Each enrichment stores separate
+technique ID, technique name, tactic, confidence, recommended action, match type,
+and evidence fields. Match type is one of `exact`, `predicted_class`, `fuzzy`, or
+`unknown`, so an analyst can audit which input caused the decision. Unknown
+results do not invent a technique ID.
+
+CICIDS labels and runtime predictions share `common/labels.py` normalization.
+This converts dash variants and damaged labels such as
+`Web Attack � Brute Force` to the canonical `Web Attack - Brute Force` before
+training, prediction display, or ATT&CK lookup.
 
 ## Dashboard Features
 

@@ -110,6 +110,13 @@ export default function LiveFeed() {
           const sev = alert.severity || "LOW";
           const cardCls = SEVERITY_COLOR[sev] || "border-gray-600 bg-gray-900";
           const textCls = SEVERITY_TEXT[sev] || "text-gray-400";
+          const threatIntel = alert.threat_intelligence || {};
+          const techniqueId = threatIntel.technique_id || alert.mitre_technique_id;
+          const techniqueName =
+            threatIntel.technique_name || alert.mitre_technique_name;
+          const techniqueLabel = [techniqueId, techniqueName]
+            .filter(Boolean)
+            .join(" - ") || alert.mitre_attack;
 
           return (
             <div key={index} className={`rounded-lg border p-3 ${cardCls}`}>
@@ -131,9 +138,9 @@ export default function LiveFeed() {
                 <p className="mt-1 text-xs text-slate-300">{alert.message}</p>
               )}
 
-              {alert.mitre_attack && (
+              {techniqueLabel && (
                 <p className="mt-1 truncate text-xs text-purple-400">
-                  {alert.mitre_attack}
+                  {techniqueLabel}
                 </p>
               )}
 

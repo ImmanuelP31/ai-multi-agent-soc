@@ -17,6 +17,7 @@ from common.events import (
     SequencePredictionCandidate,
     StageName,
 )
+from common.labels import normalize_attack_label
 from ml.sequence_detection.predictor import (
     DEFAULT_STATE_TTL_SECONDS,
     SequencePredictor,
@@ -42,7 +43,7 @@ ATTACK_CONTEXT = {
     "Infiltration": "Infiltration predicted; lateral movement may be underway.",
     "Web Attack - Brute Force": "Brute force predicted; consider account lockout.",
     "Web Attack - XSS": "XSS predicted; review web application firewall rules.",
-    "Web Attack - Sql Injection": "SQL injection predicted; database integrity is at risk.",
+    "Web Attack - SQL Injection": "SQL injection predicted; database integrity is at risk.",
     "FTP-Patator": "FTP brute force predicted; restrict FTP and rotate credentials.",
     "SSH-Patator": "SSH brute force predicted; require key-based authentication.",
     "DoS slowloris": "Slowloris predicted; tune connection timeouts.",
@@ -54,12 +55,13 @@ ATTACK_CONTEXT = {
 
 
 def get_context(attack_name: str) -> str:
-    if attack_name in ATTACK_CONTEXT:
-        return ATTACK_CONTEXT[attack_name]
+    normalized = normalize_attack_label(attack_name)
+    if normalized in ATTACK_CONTEXT:
+        return ATTACK_CONTEXT[normalized]
     for key, message in ATTACK_CONTEXT.items():
-        if key.lower() in attack_name.lower():
+        if key.lower() in normalized.lower():
             return message
-    return f"Unknown predicted attack '{attack_name}'; manual review is required."
+    return f"Unknown predicted attack '{normalized}'; manual review is required."
 
 
 def create_runtime_predictor() -> SequencePredictor:

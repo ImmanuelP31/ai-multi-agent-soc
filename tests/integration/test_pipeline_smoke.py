@@ -37,7 +37,8 @@ def wait_for_reporting(engine, previous_updated_at=None):
                 text(
                     "SELECT event_id, incident_id, current_stage, detection_method, "
                     "investigation_method, mitre_technique_id, remediation_actions, "
-                    "remediation_metadata, "
+                    "mitre_mapping_version, mitre_evidence, "
+                    "threat_intelligence_method, remediation_metadata, "
                     "updated_at FROM incidents WHERE event_id = :event_id"
                 ),
                 {"event_id": str(EVENT_ID)},
@@ -84,6 +85,9 @@ def test_replayed_event_produces_one_enriched_incident_and_report():
         assert first["detection_method"] == "rule_based_fallback"
         assert first["investigation_method"]
         assert first["mitre_technique_id"] == "T1046"
+        assert first["mitre_mapping_version"] == "2026-09-project-v1"
+        assert first["threat_intelligence_method"] == "exact"
+        assert first["mitre_evidence"]
         assert first["remediation_actions"]
         assert first["remediation_metadata"]["dry_run"] is True
         assert all(

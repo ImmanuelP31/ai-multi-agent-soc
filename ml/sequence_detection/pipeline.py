@@ -16,6 +16,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.preprocessing import StandardScaler
 
+from common.labels import normalize_attack_label
 from ml.features.network_flow import (
     NETWORK_FLOW_FEATURES,
     InvalidTelemetryError,
@@ -144,10 +145,6 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def normalize_label(value: Any) -> str:
-    return " ".join(str(value).strip().replace("\ufffd", "-").split())
-
-
 def prepare_source_frame(
     frame: pd.DataFrame,
     source_group: str,
@@ -161,7 +158,7 @@ def prepare_source_frame(
 
     canonical = canonical_feature_frame(prepared)
     result = canonical.copy()
-    result[TARGET_COLUMN] = prepared[TARGET_COLUMN].map(normalize_label)
+    result[TARGET_COLUMN] = prepared[TARGET_COLUMN].map(normalize_attack_label)
     if (result[TARGET_COLUMN] == "").any():
         raise SequenceDataError(f"{source_group} contains an empty target label")
 
@@ -237,7 +234,7 @@ def split_source_groups(
 def fit_label_mapping(frames: Iterable[pd.DataFrame]) -> dict[str, int]:
     labels = sorted(
         {
-            normalize_label(label)
+            normalize_attack_label(label)
             for frame in frames
             for label in frame[TARGET_COLUMN].tolist()
         }

@@ -103,9 +103,24 @@ class ReportingProcessor:
                 event.investigation_metadata.predicted_next_attack
             ),
             "lstm_confidence": event.investigation_metadata.confidence,
-            "mitre_attack": event.threat_intelligence.mitre_attack,
-            "mitre_tactic": event.threat_intelligence.mitre_tactic,
+            "mitre_attack": (
+                f"{event.threat_intelligence.technique_id} - "
+                f"{event.threat_intelligence.technique_name}"
+                if event.threat_intelligence.technique_id
+                else event.threat_intelligence.technique_name
+            ),
+            "mitre_technique_id": event.threat_intelligence.technique_id,
+            "mitre_technique_name": event.threat_intelligence.technique_name,
+            "mitre_tactic": event.threat_intelligence.tactic,
             "mitre_confidence": event.threat_intelligence.confidence,
+            "mitre_mapping_version": event.threat_intelligence.mapping_version,
+            "mitre_match_type": (
+                event.threat_intelligence.match_type.value
+                if event.threat_intelligence.match_type
+                else None
+            ),
+            "mitre_evidence": event.threat_intelligence.evidence,
+            "threat_intelligence": event.threat_intelligence.model_dump(mode="json"),
             "recommended_action": event.threat_intelligence.recommended_action,
             "remediation_actions": [
                 action.model_dump(mode="json")

@@ -272,12 +272,12 @@ def test_replay_keeps_action_identity_and_one_log_record(tmp_path, monkeypatch):
         "expected",
     ),
     [
-        (Severity.HIGH, "Impact", 0.94, "exact_match", 0, Severity.CRITICAL),
+        (Severity.HIGH, "Impact", 0.94, "exact", 0, Severity.CRITICAL),
         (
             Severity.HIGH,
             "Privilege Escalation",
             0.91,
-            "exact_match",
+            "exact",
             0,
             Severity.CRITICAL,
         ),
@@ -285,13 +285,13 @@ def test_replay_keeps_action_identity_and_one_log_record(tmp_path, monkeypatch):
             Severity.HIGH,
             "Credential Access",
             0.95,
-            "exact_match",
+            "exact",
             10,
             Severity.CRITICAL,
         ),
-        (Severity.HIGH, "Impact", 0.89, "exact_match", 0, Severity.HIGH),
-        (Severity.HIGH, "Impact", 0.94, "fuzzy_keyword_match", 0, Severity.HIGH),
-        (Severity.MEDIUM, "Impact", 0.94, "exact_match", 0, Severity.MEDIUM),
+        (Severity.HIGH, "Impact", 0.89, "exact", 0, Severity.HIGH),
+        (Severity.HIGH, "Impact", 0.94, "fuzzy", 0, Severity.HIGH),
+        (Severity.MEDIUM, "Impact", 0.94, "exact", 0, Severity.MEDIUM),
     ],
 )
 def test_critical_severity_requires_deterministic_corroborating_evidence(

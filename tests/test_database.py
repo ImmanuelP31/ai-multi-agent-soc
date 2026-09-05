@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from agents.remediation_agent import RemediationProcessor
 from backend import database
-from backend.routes.alerts import get_stats
+from backend.routes.alerts import get_alerts, get_stats
 from common.events import (
     DetectionMetadata,
     InvestigationMetadata,
@@ -17,6 +17,7 @@ from common.events import (
     Severity,
     StageName,
     ThreatIntelligenceMetadata,
+    ThreatMatchType,
 )
 
 
@@ -58,11 +59,14 @@ def enrich_event(event: SOCEvent) -> tuple[SOCEvent, SOCEvent, SOCEvent, SOCEven
 
     threat_enriched = investigated.model_copy(deep=True)
     threat_enriched.threat_intelligence = ThreatIntelligenceMetadata(
-        mitre_attack="T1046 - Network Service Discovery",
-        mitre_tactic="Discovery",
+        technique_id="T1046",
+        technique_name="Network Service Discovery",
+        tactic="Discovery",
+        mapping_version="2026-09-project-v1",
+        match_type=ThreatMatchType.EXACT,
         confidence=0.83,
+        evidence='event == "PortScan"',
         recommended_action="Block the scanning source.",
-        method="exact_match",
     )
     threat_enriched = threat_enriched.advance_stage(
         StageName.THREAT_INTEL,
@@ -121,7 +125,12 @@ class IncidentPersistenceTests(DatabaseTestCase):
             self.assertEqual(row.predicted_next_attack, "PortScan")
             self.assertEqual(row.mitre_technique_id, "T1046")
             self.assertEqual(row.mitre_technique_name, "Network Service Discovery")
-            self.assertEqual(row.threat_intelligence_method, "exact_match")
+            self.assertEqual(row.threat_intelligence_method, "exact")
+            self.assertEqual(row.mitre_mapping_version, "2026-09-project-v1")
+            self.assertEqual(row.mitre_evidence, 'event == "PortScan"')
+            self.assertEqual(
+                row.threat_intelligence_metadata["technique_id"], "T1046"
+            )
             self.assertEqual(row.remediation_actions[0]["action"], "BLOCK_IP")
 
     def test_prediction_confidence_is_numeric(self):
@@ -137,6 +146,17 @@ class IncidentPersistenceTests(DatabaseTestCase):
             self.assertIsInstance(row.prediction_confidence, float)
             self.assertAlmostEqual(row.prediction_confidence, 0.734)
             self.assertIsInstance(row.anomaly_score, float)
+
+    def test_alert_api_exposes_structured_threat_intelligence(self):
+        _, _, enriched, _ = enrich_event(base_event())
+        database.persist_event(enriched)
+
+        alert = get_alerts()[0]
+
+        self.assertEqual(alert["threat_intelligence"]["technique_id"], "T1046")
+        self.assertEqual(alert["mitre_match_type"], "exact")
+        self.assertEqual(alert["mitre_mapping_version"], "2026-09-project-v1")
+        self.assertEqual(alert["mitre_evidence"], 'event == "PortScan"')
 
     def test_duplicate_replay_does_not_erase_later_enrichment(self):
         event = base_event()

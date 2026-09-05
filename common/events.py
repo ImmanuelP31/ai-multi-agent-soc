@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+import re
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -15,8 +16,8 @@ from common.remediation import (
 )
 
 
-SCHEMA_VERSION = "1.1"
-PROCESSING_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2"
+PROCESSING_VERSION = "1.2.0"
 
 
 def utc_now() -> datetime:
@@ -31,6 +32,13 @@ class Severity(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class ThreatMatchType(str, Enum):
+    EXACT = "exact"
+    PREDICTED_CLASS = "predicted_class"
+    FUZZY = "fuzzy"
+    UNKNOWN = "unknown"
+
+
 CRITICAL_THREAT_CONFIDENCE = 0.90
 CRITICAL_THREAT_TACTICS = frozenset({"Impact", "Privilege Escalation"})
 CRITICAL_FAILED_LOGIN_COUNT = 10
@@ -41,14 +49,17 @@ def severity_with_threat_evidence(
     *,
     tactic: str | None,
     confidence: float | None,
-    match_type: str | None,
+    match_type: ThreatMatchType | str | None,
     failed_login_count: int | None,
 ) -> Severity:
     """Promote HIGH to CRITICAL only when corroborating threat evidence exists."""
 
     if severity is not Severity.HIGH:
         return severity
-    if match_type != "exact_match" or confidence is None:
+    normalized_match = (
+        match_type.value if isinstance(match_type, ThreatMatchType) else match_type
+    )
+    if normalized_match != ThreatMatchType.EXACT.value or confidence is None:
         return severity
     if confidence < CRITICAL_THREAT_CONFIDENCE:
         return severity
@@ -118,11 +129,55 @@ class InvestigationMetadata(ContractModel):
 
 
 class ThreatIntelligenceMetadata(ContractModel):
-    mitre_attack: str | None = None
-    mitre_tactic: str | None = None
+    technique_id: str | None = None
+    technique_name: str | None = None
+    tactic: str | None = None
+    mapping_version: str | None = None
+    match_type: ThreatMatchType | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence: str | None = None
     recommended_action: str | None = None
-    method: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        data = dict(value)
+        combined = data.pop("mitre_attack", None)
+        if combined and not data.get("technique_id"):
+            match = re.match(r"^\s*(T\d{4}(?:\.\d{3})?)\s*(.*)$", str(combined))
+            if match:
+                data["technique_id"] = match.group(1)
+                name = re.sub(r"^[^A-Za-z0-9]+", "", match.group(2)).strip()
+                if name:
+                    data.setdefault("technique_name", name)
+            else:
+                data.setdefault("technique_name", str(combined).strip())
+
+        if "mitre_tactic" in data and "tactic" not in data:
+            data["tactic"] = data.pop("mitre_tactic")
+        else:
+            data.pop("mitre_tactic", None)
+
+        legacy_match_types = {
+            "exact_match": ThreatMatchType.EXACT.value,
+            "predicted_attack_match": ThreatMatchType.PREDICTED_CLASS.value,
+            "fuzzy_keyword_match": ThreatMatchType.FUZZY.value,
+            "unknown": ThreatMatchType.UNKNOWN.value,
+        }
+        legacy_method = data.pop("method", None)
+        if legacy_method is not None and "match_type" not in data:
+            data["match_type"] = legacy_match_types.get(
+                str(legacy_method), ThreatMatchType.UNKNOWN.value
+            )
+        raw_match_type = data.get("match_type")
+        if not isinstance(raw_match_type, ThreatMatchType):
+            normalized_match_type = legacy_match_types.get(str(raw_match_type))
+            if normalized_match_type:
+                data["match_type"] = normalized_match_type
+        return data
 
 
 class RemediationMetadata(ContractModel):
@@ -233,10 +288,13 @@ class SOCEvent(ContractModel):
         threat_intelligence = dict(data.get("threat_intelligence") or {})
         for old, new in (
             ("mitre_attack", "mitre_attack"),
+            ("mitre_technique_name", "technique_name"),
             ("mitre_tactic", "mitre_tactic"),
             ("mitre_confidence", "confidence"),
+            ("mitre_mapping_version", "mapping_version"),
+            ("mitre_evidence", "evidence"),
             ("recommended_action", "recommended_action"),
-            ("threat_intel_method", "method"),
+            ("threat_intel_method", "match_type"),
         ):
             if old in data and new not in threat_intelligence:
                 threat_intelligence[new] = data[old]
@@ -342,11 +400,18 @@ class SOCEvent(ContractModel):
                 ),
                 "confidence": self.investigation_metadata.confidence,
                 "lstm_status": self.investigation_metadata.model_status,
-                "mitre_attack": self.threat_intelligence.mitre_attack,
-                "mitre_tactic": self.threat_intelligence.mitre_tactic,
+                "mitre_attack": self.threat_intelligence.technique_id,
+                "mitre_technique_name": self.threat_intelligence.technique_name,
+                "mitre_tactic": self.threat_intelligence.tactic,
                 "mitre_confidence": self.threat_intelligence.confidence,
+                "mitre_mapping_version": self.threat_intelligence.mapping_version,
+                "mitre_evidence": self.threat_intelligence.evidence,
                 "recommended_action": self.threat_intelligence.recommended_action,
-                "threat_intel_method": self.threat_intelligence.method,
+                "threat_intel_method": (
+                    self.threat_intelligence.match_type.value
+                    if self.threat_intelligence.match_type
+                    else None
+                ),
                 "remediation_actions": [
                     action.model_dump(mode="json")
                     for action in self.remediation.actions

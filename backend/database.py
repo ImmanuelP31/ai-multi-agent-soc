@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import os
-import re
 from typing import Any
 
 from sqlalchemy import (
@@ -86,6 +85,10 @@ class Incident(Base):
     threat_intelligence_method: Mapped[str | None] = mapped_column(
         String(128), nullable=True
     )
+    mitre_mapping_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    mitre_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     threat_intelligence_metadata: Mapped[dict[str, Any] | None] = mapped_column(
         JSON_DOCUMENT, nullable=True
     )
@@ -199,17 +202,6 @@ def _as_event(value: SOCEvent | dict[str, Any]) -> SOCEvent:
     return deserialize_event(value)
 
 
-def split_mitre_technique(value: str | None) -> tuple[str | None, str | None]:
-    if not value:
-        return None, None
-    match = re.match(r"^\s*(T\d{4}(?:\.\d{3})?)\s*(.*)$", value)
-    if not match:
-        return None, value.strip()
-    technique_id, remainder = match.groups()
-    technique_name = re.sub(r"^[^A-Za-z0-9]+", "", remainder).strip() or None
-    return technique_id, technique_name
-
-
 STAGE_ORDER = {
     StageName.INGESTION.value: 0,
     StageName.DETECTION.value: 1,
@@ -253,15 +245,18 @@ def _apply_event(row: Incident, event: SOCEvent) -> None:
         row.investigation_metadata = payload["investigation_metadata"]
 
     if incoming_rank >= STAGE_ORDER[StageName.THREAT_INTEL.value]:
-        technique_id, technique_name = split_mitre_technique(
-            event.threat_intelligence.mitre_attack
-        )
-        row.mitre_technique_id = technique_id
-        row.mitre_technique_name = technique_name
-        row.mitre_tactic = event.threat_intelligence.mitre_tactic
+        row.mitre_technique_id = event.threat_intelligence.technique_id
+        row.mitre_technique_name = event.threat_intelligence.technique_name
+        row.mitre_tactic = event.threat_intelligence.tactic
         row.mitre_confidence = event.threat_intelligence.confidence
         row.recommended_action = event.threat_intelligence.recommended_action
-        row.threat_intelligence_method = event.threat_intelligence.method
+        row.threat_intelligence_method = (
+            event.threat_intelligence.match_type.value
+            if event.threat_intelligence.match_type
+            else None
+        )
+        row.mitre_mapping_version = event.threat_intelligence.mapping_version
+        row.mitre_evidence = event.threat_intelligence.evidence
         row.threat_intelligence_metadata = payload["threat_intelligence"]
 
     if incoming_rank >= STAGE_ORDER[StageName.REMEDIATION.value]:

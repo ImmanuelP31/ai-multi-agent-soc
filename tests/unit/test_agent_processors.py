@@ -17,6 +17,7 @@ from common.events import (
     SOCEvent,
     Severity,
     TelemetryPayload,
+    ThreatMatchType,
 )
 from ml.features.network_flow import AnomalyInference, ModelBundleError
 from ml.sequence_detection.predictor import (
@@ -195,9 +196,9 @@ def test_investigation_processor_rejects_corrupted_model_output():
 def test_threat_intel_exact_match():
     result = ThreatIntelProcessor().process(make_event(event="failed_login"))
 
-    assert result.threat_intelligence.method == "exact_match"
+    assert result.threat_intelligence.match_type is ThreatMatchType.EXACT
     assert result.threat_intelligence.confidence == pytest.approx(0.95)
-    assert result.threat_intelligence.mitre_attack.startswith("T1110")
+    assert result.threat_intelligence.technique_id == "T1110"
 
 
 def test_threat_intel_uses_predicted_attack_mapping():
@@ -208,19 +209,19 @@ def test_threat_intel_uses_predicted_attack_mapping():
 
     result = ThreatIntelProcessor().process(event)
 
-    assert result.threat_intelligence.method == "predicted_attack_match"
+    assert result.threat_intelligence.match_type is ThreatMatchType.PREDICTED_CLASS
     assert result.threat_intelligence.confidence == pytest.approx(0.79)
-    assert result.threat_intelligence.mitre_attack.startswith("T1046")
+    assert result.threat_intelligence.technique_id == "T1046"
 
 
 def test_threat_intel_fuzzy_and_unknown_matches_are_explicit():
     fuzzy = ThreatIntelProcessor().process(make_event(event="suspicious scan traffic"))
     unknown = ThreatIntelProcessor().process(make_event(event="novel behavior"))
 
-    assert fuzzy.threat_intelligence.method == "fuzzy_keyword_match"
+    assert fuzzy.threat_intelligence.match_type is ThreatMatchType.FUZZY
     assert fuzzy.threat_intelligence.confidence == pytest.approx(0.60)
-    assert unknown.threat_intelligence.method == "unknown"
-    assert unknown.threat_intelligence.confidence == pytest.approx(0.30)
+    assert unknown.threat_intelligence.match_type is ThreatMatchType.UNKNOWN
+    assert unknown.threat_intelligence.confidence == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(

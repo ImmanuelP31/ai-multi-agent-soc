@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 import numpy as np
 
 from common.events import SOCEvent
+from common.labels import normalize_attack_label
 from ml.sequence_detection.pipeline import (
     SEQUENCE_FEATURES,
     SEQUENCE_LENGTH,
@@ -311,7 +312,10 @@ class SequencePredictor:
                 store=store,
                 model=model,
                 preprocessor=preprocessor,
-                label_mapping={int(index): label for label, index in raw_mapping.items()},
+                label_mapping={
+                    int(index): normalize_attack_label(label)
+                    for label, index in raw_mapping.items()
+                },
                 sequence_length=sequence_length,
                 model_version=metadata.get("model_version"),
                 model_status="loaded",
@@ -381,7 +385,7 @@ class SequencePredictor:
         top_predictions = tuple(
             PredictionCandidate(
                 rank=rank,
-                attack_class=self.label_mapping[int(index)],
+                attack_class=normalize_attack_label(self.label_mapping[int(index)]),
                 confidence=float(probabilities[index]),
             )
             for rank, index in enumerate(top_indexes, start=1)
