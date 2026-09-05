@@ -1,114 +1,215 @@
-# AI Multi-Agent SOC (Security Operations Center) Dashboard
+# AI Multi-Agent SOC
 
-![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)
-![React](https://img.shields.io/badge/React-Dashboard-61DAFB?style=for-the-badge&logo=react&logoColor=0B1020)
-![Kafka](https://img.shields.io/badge/Kafka-Streaming-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Persistence-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
+> Event-driven security operations pipeline for network-flow anomaly detection, per-source sequence correlation, structured MITRE ATT&CK enrichment, policy-gated remediation, and live incident analysis.
 
-An end-to-end autonomous Security Operations Center built with real-time event streaming, AI-powered detection, multi-agent investigation, remediation workflows, and a polished live analyst dashboard.
+Five Kafka-backed workers progressively enrich a canonical security event without changing its identity. PostgreSQL stores one durable incident per event, Redis holds bounded sequence state and live-feed messages, and FastAPI supplies REST and WebSocket data to a React analyst dashboard. Trained ML artifacts are optional and their runtime availability is reported explicitly.
 
-![AI Multi-Agent SOC Dashboard demo](docs/assets/soc-dashboard-demo.gif)
+![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
+![React 19](https://img.shields.io/badge/UI-React_19-61DAFB?style=flat-square&logo=react&logoColor=0B1020)
+![Apache Kafka](https://img.shields.io/badge/Streaming-Apache_Kafka-231F20?style=flat-square&logo=apachekafka&logoColor=white)
+![PostgreSQL 15](https://img.shields.io/badge/Database-PostgreSQL_15-4169E1?style=flat-square&logo=postgresql&logoColor=white)
+![Docker Compose](https://img.shields.io/badge/Runtime-Docker_Compose-2496ED?style=flat-square&logo=docker&logoColor=white)
+[![CI](https://github.com/ImmanuelP31/ai-multi-agent-soc/actions/workflows/ci.yml/badge.svg)](https://github.com/ImmanuelP31/ai-multi-agent-soc/actions/workflows/ci.yml)
 
-## Why This Project Stands Out
+![AI Multi-Agent SOC dashboard](docs/assets/soc-dashboard-demo.gif)
 
-This project simulates a modern AI-assisted SOC pipeline where multiple agents collaborate over Kafka to detect, enrich, investigate, remediate, and report security incidents in real time.
+_The dashboard combines persisted incident history with a Redis-backed live WebSocket feed._
 
-It is designed to demonstrate production-oriented engineering skills across distributed systems, ML integration, backend APIs, Dockerized infrastructure, and frontend observability.
+## Contents
 
-## Core Capabilities
+- [Why this project exists](#why-this-project-exists)
+- [Architecture](#architecture)
+- [Engineering properties](#engineering-properties)
+- [ML pipeline](#ml-pipeline)
+- [Reliability and replay safety](#reliability-and-replay-safety)
+- [Security model](#security-model)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [API](#api)
+- [Development and testing](#development-and-testing)
+- [Repository structure](#repository-structure)
+- [Current scope and limitations](#current-scope-and-limitations)
+- [Design decisions](#design-decisions)
 
-- Real-time security event pipeline using Kafka topics.
-- FastAPI backend with REST endpoints and WebSocket streaming.
-- PostgreSQL persistence for alert history and dashboard analytics.
-- Redis pub/sub bridge for live SOC feed updates.
-- Multi-agent workflow for detection, investigation, threat intelligence, remediation, and reporting.
-- Isolation Forest anomaly detection with an explicit telemetry-rule demo mode.
-- Leakage-free LSTM sequence prediction when trained artifacts are supplied.
-- React dashboard with live stats, severity chart, alert table, predictions, and threat feed.
-- Fully Dockerized infrastructure for repeatable local runs.
+## Why this project exists
 
-## System Architecture
+Security telemetry arrives continuously, while useful incident context emerges over time. A detector can flag a single flow, but investigation, ATT&CK mapping, response planning, durable storage, and analyst visibility have different state and failure requirements.
 
-```text
-Attack Simulator
-      |
-      v
-Kafka: soc_logs (keyed by source_ip)
-      |
-      v
-Detection Agent
-      |
-      v
-Kafka: soc_alerts
-      |
-      v
-Investigation Agent -> Redis sequence window -> Kafka: investigated_alerts
-      |
-      v
-Threat Intel Agent -> Kafka: threat_enriched_alerts
-      |
-      v
-Remediation Agent -> Kafka: remediation_actions
-      |
-      +--> Reporting Agent
-      +--> PostgreSQL (one progressively enriched row)
-      +--> Redis pub/sub -> FastAPI WebSocket -> React Dashboard
+This repository separates those responsibilities into independently restartable Kafka consumers. It also addresses the less visible engineering problems behind the pipeline: stable event identity, training-serving feature parity, per-source sequence isolation, at-least-once delivery, idempotent persistence, and constrained remediation.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    SIM["Attack simulator"] --> LOGS[("Kafka<br/>soc_logs")]
+    LOGS --> DET["Detection Agent"]
+    DET --> ALERTS[("Kafka<br/>soc_alerts")]
+    ALERTS --> INV["Investigation Agent"]
+    INV --> INVESTIGATED[("Kafka<br/>investigated_alerts")]
+    INVESTIGATED --> INTEL["Threat Intelligence Agent"]
+    INTEL --> ENRICHED[("Kafka<br/>threat_enriched_alerts")]
+    ENRICHED --> REM["Remediation Agent"]
+    REM --> ACTIONS[("Kafka<br/>remediation_actions")]
+    ACTIONS --> REP["Reporting Agent"]
+
+    BUNDLE["Optional anomaly bundle"] -.-> DET
+    SEQ["Optional LSTM artifacts"] -.-> INV
+    INV <--> REDIS[("Redis<br/>sequence windows + live channel")]
+
+    DET --> PG[("PostgreSQL<br/>canonical incidents")]
+    INV --> PG
+    INTEL --> PG
+    REM --> PG
+    REP --> PG
+    REP --> REPORTS["JSON incident reports"]
+
+    ACTIONS --> BRIDGE["FastAPI Kafka bridge"]
+    BRIDGE --> REDIS
+    REDIS --> API["FastAPI REST + WebSocket"]
+    PG --> API
+    API --> UI["React dashboard"]
 ```
 
-Every message uses the canonical Pydantic contract in `common/events.py`.
-The simulator creates `event_id` and `incident_id` once; every downstream
-agent validates and preserves both values. Messages are keyed by `source_ip`
-(falling back to `incident_id`) and each agent uses its own stable consumer
-group with manual offset commits. An offset is committed only after the
-database upsert, required local output, and downstream Kafka publication
-succeed.
+### Event lifecycle
 
-PostgreSQL enforces a unique index on `event_id`. Detection, investigation,
-threat intelligence, remediation, and reporting update that same incident row
-with nested metadata and the current processing stage, so Kafka retries enrich
-the existing incident instead of inserting duplicates.
+1. The simulator creates a canonical event with one `event_id`, one `incident_id`, numeric flow telemetry, and isolated synthetic ground truth.
+2. Detection validates telemetry and applies either the configured Isolation Forest bundle or the explicitly selected telemetry-rule mode.
+3. Investigation appends the transformed flow to a Redis window scoped to the source IP, then uses the trained LSTM when a complete compatible artifact set is loaded.
+4. Threat Intelligence normalizes observed and predicted labels and records a versioned ATT&CK technique, tactic, confidence, match type, evidence, and recommended action.
+5. Remediation derives typed actions, validates targets, applies policy, and records dry-run results before publishing the enriched event.
+6. Reporting uses the propagated incident identity to update a deterministic JSON report and the same PostgreSQL row.
+7. FastAPI exposes historical state through REST and relays final enriched events from Kafka through Redis pub/sub to the dashboard WebSocket.
 
-The active topic chain is `soc_logs` (`soc-detection`), `soc_alerts`
-(`soc-investigation`), `investigated_alerts` (`soc-threat-intel`),
-`threat_enriched_alerts` (`soc-remediation`), and `remediation_actions`
-(`soc-reporting`). Sequence prediction exists only inside Investigation; there
-is no second sequence consumer or parallel prediction topic.
+Each processing stage validates the Pydantic contract, upserts the incident, completes its required output, publishes downstream where applicable, and only then commits the Kafka offset.
 
-## Tech Stack
+## Engineering properties
 
-| Layer | Tools |
+| Capability | Implementation |
 | --- | --- |
-| Frontend | React, Vite, Tailwind CSS, TanStack React Query, Recharts, Framer Motion |
-| Backend | FastAPI, SQLAlchemy, WebSockets |
-| Streaming | Apache Kafka, Zookeeper |
-| Realtime | Redis pub/sub and durable sequence windows |
-| Database | PostgreSQL |
-| ML | scikit-learn, TensorFlow, NumPy, Pandas |
-| DevOps | Docker, Docker Compose |
+| Event transport | Five explicit Kafka topics with messages keyed by `source_ip`, falling back to `incident_id` |
+| Event contract | Strict Pydantic `SOCEvent` schema with structured stage metadata and backward-compatible read projections |
+| Delivery semantics | At-least-once Kafka processing with stable consumer groups and manual offset commits |
+| Persistence | PostgreSQL and SQLAlchemy with an `event_id` uniqueness constraint and progressive upserts |
+| Schema evolution | Alembic migrations; runtime services verify connectivity and do not mutate schemas ad hoc |
+| Correlation state | Replay-safe, bounded Redis lists per source identity with a configurable TTL |
+| Detection | Isolation Forest bundle with shared preprocessing, plus an explicit telemetry-rule demo mode |
+| Sequence prediction | Leakage-aware LSTM pipeline and first-order Markov evaluation baseline |
+| Threat mapping | Structured, versioned local MITRE ATT&CK mapping with auditable evidence |
+| Remediation | Typed action plans behind a validation and policy boundary; shipped executor is dry-run only |
+| API and UI | FastAPI REST/WebSocket backend and React dashboard with TanStack Query caching |
+| Verification | Pytest unit and Compose integration tests, frontend tests, Ruff, ESLint, builds, and GitHub Actions |
 
-## Repository Layout
+## Technology stack
 
-```text
-ai-multi-agent-soc/
-├── agents/                 # Detection, investigation, intel, remediation, reporting agents
-├── alembic/                # Versioned PostgreSQL schema migrations
-├── backend/                # FastAPI app, canonical incident model, API and WebSocket stream
-├── common/                 # Canonical event contract and replay-safe Kafka helpers
-├── frontend/               # React SOC dashboard
-├── kafka/                  # Kafka producer and consumer helpers
-├── ml/                     # Training and sequence detection workflows
-├── scripts/                # Attack simulator and operational scripts
-├── docker-compose.yml      # Full local infrastructure
-├── docker-compose.dev.yml  # Optional host ports for infrastructure debugging
-├── Dockerfile              # Runtime, sequence, test, and training targets
-└── README.md
+| Layer | Technology |
+| --- | --- |
+| Event streaming | Apache Kafka 3.7 with ZooKeeper |
+| API | Python 3.11, FastAPI, WebSockets |
+| Persistence | PostgreSQL 15, SQLAlchemy 2, Alembic |
+| Ephemeral state | Redis 7 |
+| ML | scikit-learn, TensorFlow/Keras, NumPy, Pandas |
+| Frontend | React 19, Vite, Tailwind CSS, TanStack Query, Recharts, Framer Motion |
+| Runtime | Multi-stage Docker images and Docker Compose |
+| Testing | pytest, Vitest, Testing Library, GitHub Actions |
+
+## ML pipeline
+
+The repository keeps model training offline and validates artifacts before runtime use. Generated datasets and model files are intentionally excluded from version control.
+
+### Anomaly detection
+
+The training scripts expect CICIDS2017 network-flow CSV captures under `ml/datasets/`. [`ml/features/network_flow.py`](ml/features/network_flow.py) defines the ten canonical features and is imported by both training and runtime inference.
+
+The complete `anomaly_bundle.joblib` contains:
+
+- an Isolation Forest fitted on benign rows from the training split;
+- a median imputer and standard scaler fitted only on that training population;
+- the exact feature names and order;
+- model, bundle, scikit-learn, and feature-pipeline versions;
+- decision-function thresholds and their derivation.
+
+Runtime inference reads only `telemetry.flow_features`. Event names and simulator ground-truth labels are not used to construct model inputs. `DETECTION_MODE=ml` fails startup if the bundle is absent or incompatible; the clean-clone default is the visibly reported `rule_based` demo mode.
+
+Evaluation writes precision, recall, F1, a confusion matrix, false-positive rate, false-negative rate, and detection rate to `ml/models/anomaly_evaluation.json` when the dataset and bundle are available. No evaluation artifact is committed, so this README does not claim an anomaly benchmark.
+
+### Sequence prediction
+
+The LSTM predicts the next event class from sequences of five transformed network-flow observations. It uses the same feature contract as anomaly detection and excludes attack labels, severity, label frequency, and synthetic repeat-offender flags from `X`.
+
+Source capture files are assigned to train, validation, and test groups before overlapping windows are built. Windows remain inside a source/session entity when the dataset exposes one; otherwise the source file is the documented chronological boundary. Imputation and scaling are fitted on training groups only and reused by validation, test, and runtime inference.
+
+Training records accuracy, macro F1, weighted F1, top-3 accuracy, per-class precision/recall/F1, support, and a confusion matrix. A first-order Markov model is evaluated on the same held-out test groups. The versioned [`metadata.json`](ml/sequence_detection/metadata.json) currently has `status: requires_retraining` and contains no replacement metrics, so no LSTM score is presented here.
+
+At runtime, Investigation uses one bounded Redis list per source identity and suppresses duplicate appends by `event_id`. `SEQUENCE_PREDICTION_MODE=required` fails when the model or preprocessor is unavailable. The default `optional` mode records the unavailable reason and does not substitute a rule-based next-attack prediction.
+
+### Build model artifacts
+
+Place the expected CICIDS2017 CSV files in `ml/datasets/`, then run the relevant workflow:
+
+```bash
+# Anomaly bundle
+docker compose --profile training run --rm ml-training python ml/training/preprocess_dataset.py
+docker compose --profile training run --rm ml-training python ml/training/create_splits.py
+docker compose --profile training run --rm ml-training python ml/training/train_anomaly_model.py
+docker compose --profile training run --rm ml-training python ml/training/evaluate_anomaly_model.py
+
+# Sequence model, preprocessor, metadata, and evaluation
+docker compose --profile training run --rm ml-training python ml/sequence_detection/generate_rich_sequences.py
+docker compose --profile training run --rm ml-training python ml/sequence_detection/train_lstm_model.py
+docker compose --profile training run --rm ml-training python scripts/evaluate_sequence_model.py
 ```
 
-## Quick Start
+Artifact requirements and runtime behavior are documented in [`ml/models/README.md`](ml/models/README.md) and [`ml/sequence_detection/ARTIFACTS.md`](ml/sequence_detection/ARTIFACTS.md).
 
-### 1. Clone and enter the repo
+After generating artifacts, set `DETECTION_MODE=ml` and/or `SEQUENCE_PREDICTION_MODE=required` in `.env`, then rebuild the corresponding agent container so the artifacts are included in its image.
+
+## Reliability and replay safety
+
+Kafka delivery is treated as at-least-once. Application-level idempotency ensures a replayed event enriches the existing incident instead of creating a duplicate.
+
+| Input topic | Consumer | Group ID | Output topic |
+| --- | --- | --- | --- |
+| `soc_logs` | Detection Agent | `soc-detection` | `soc_alerts` |
+| `soc_alerts` | Investigation Agent | `soc-investigation` | `investigated_alerts` |
+| `investigated_alerts` | Threat Intelligence Agent | `soc-threat-intel` | `threat_enriched_alerts` |
+| `threat_enriched_alerts` | Remediation Agent | `soc-remediation` | `remediation_actions` |
+| `remediation_actions` | Reporting Agent | `soc-reporting` | Final local report |
+| `remediation_actions` | FastAPI live bridge | `soc-live-alert-bridge` | Redis `live_alerts` channel |
+
+- Ingestion generates identity once. Downstream agents reject events missing the required IDs instead of regenerating them.
+- Kafka auto-commit is disabled. Processing, persistence, local output, and downstream publication must succeed before the consumed offset advances.
+- Processing failures are logged, the offset remains uncommitted, and the consumer seeks back to the failed message for retry.
+- PostgreSQL locks and upserts by unique `event_id`; stage ordering prevents an older replay from rolling the incident stage backward.
+- Remediation action IDs are deterministic from incident identity, action type, target type, and normalized target.
+- Reporting writes `logs/reports/<incident_id>.json` and tracks processed incident IDs in its summary, making replay overwrite/update the same logical report.
+
+The project intentionally has no dead-letter queue. A permanently malformed record remains a visible retry condition rather than being silently acknowledged.
+
+## Security model
+
+Remediation demonstrates response orchestration without mutating the host or an external security control.
+
+- Supported actions are restricted to `BLOCK_IP`, `RATE_LIMIT_IP`, `ISOLATE_USER`, `FLAG_USER_FOR_REVIEW`, `INCREASE_MONITORING`, `AUDIT_LOG`, and `ESCALATE_TO_ANALYST`.
+- IP targets pass through Python's `ipaddress` parser. Missing, unknown, malformed, loopback, link-local, unspecified, and multicast targets are non-actionable.
+- User targets use a constrained identity character set.
+- Command previews are typed argument arrays generated only after validation. The runtime does not call `subprocess`, interpolate untrusted shell strings, or use `shell=True`.
+- Network-control and user-isolation actions are classified as requiring approval. Valid private addresses are retained for local simulation but cannot be executed by the shipped runtime.
+- The only installed executor is `dry_run`; unsupported execution modes fail startup. No firewall, cloud, EDR, or identity-provider integration is enabled.
+
+Severity is shared across the event contract, persistence, API, dashboard, and remediation. A HIGH event becomes CRITICAL only when deterministic corroborating threat evidence satisfies the rule in [`common/events.py`](common/events.py).
+
+## Quick start
+
+### Prerequisites
+
+- Git
+- Docker Engine or Docker Desktop
+- Docker Compose v2 (`docker compose`)
+
+Python and Node.js are only required for development outside containers.
+
+### Configure
 
 ```bash
 git clone https://github.com/ImmanuelP31/ai-multi-agent-soc.git
@@ -116,284 +217,189 @@ cd ai-multi-agent-soc
 cp .env.example .env
 ```
 
-On Windows PowerShell, use `Copy-Item .env.example .env`. The example contains
-local-only values; choose a different URL-safe database password for any shared
-environment.
+On Windows PowerShell, use `Copy-Item .env.example .env`. The example is for local use; change the placeholder database password before using a shared environment.
 
-### 2. Start the SOC infrastructure
+### Start
 
 ```bash
-docker compose up -d --build
+docker compose up --build
 ```
 
-This starts PostgreSQL, Redis, ZooKeeper, Kafka, migrations, the backend, all
-five agents, and the frontend. A clean clone uses the visible `rule_based`
-detection demo mode and `optional` sequence mode. Trained ML modes are enabled
-explicitly only after their complete artifacts are generated.
+This starts PostgreSQL, Redis, ZooKeeper, Kafka, deterministic topic initialization, Alembic migration, the backend, five agents, and the frontend. A clean clone starts in explicit rule-based detection mode and optional sequence mode because generated model artifacts are not committed.
 
-Check service status:
+### Verify
 
 ```bash
 docker compose ps
+curl http://localhost:8000/health/live
+curl http://localhost:8000/health
 ```
 
-### 3. Verify the backend
+- Dashboard: [http://localhost:5173](http://localhost:5173)
+- API documentation: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-```bash
-curl http://127.0.0.1:8000/health/live
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/alerts/stats
-```
+`/health/live` reports process liveness. `/health` returns readiness for PostgreSQL, Redis, Kafka topics, all pipeline agents, and configured model modes.
 
-`/health/live` proves the API process is running. `/health` returns ready only
-when PostgreSQL, Redis, Kafka, every required topic, and every agent are ready;
-agent entries include the configured ML mode and actual model load status.
+### Generate traffic
 
-Backend and frontend URLs:
-
-```text
-http://127.0.0.1:8000
-http://127.0.0.1:5173
-```
-
-### 4. Generate simulated attacks
-
-From the repo root:
+In another terminal:
 
 ```bash
 docker compose exec backend python scripts/attack_simulator.py
 ```
 
-Only backend and frontend ports are published by default. To expose PostgreSQL,
-Redis, ZooKeeper, and Kafka for local debugging, opt in explicitly:
+The simulator emits one synthetic network-flow event every two seconds until stopped. Only backend and frontend ports are exposed by default. Use `docker-compose.dev.yml` when direct host access to infrastructure is needed:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
-## Anomaly Detection Bundle
+Stop the stack with `docker compose down`.
 
-The Isolation Forest uses one shared feature pipeline in
-`ml/features/network_flow.py`. Training and runtime inference use the same ten
-ordered network-flow fields, fitted median imputer, and fitted scaler. The
-detector reads only numeric `telemetry.flow_features`; simulator attack labels
-remain under `ground_truth` and are never model inputs.
+## Configuration
 
-Train and evaluate the complete bundle:
+The checked-in [`.env.example`](.env.example) contains local defaults and no operational secret. Compose builds `DATABASE_URL` from the PostgreSQL values below.
+
+| Variable | Purpose | Compose default |
+| --- | --- | --- |
+| `POSTGRES_USER` | PostgreSQL role | `socuser` |
+| `POSTGRES_PASSWORD` | PostgreSQL password | Local placeholder; change it |
+| `POSTGRES_DB` | Incident database | `socdb` |
+| `DATABASE_URL` | Direct Python/Alembic database connection | Constructed by Compose |
+| `KAFKA_BOOTSTRAP_SERVERS` | Kafka broker list | `kafka:9092` |
+| `REDIS_HOST`, `REDIS_PORT` | Redis connection | `redis`, `6379` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated credentialed CORS allowlist | Local frontend origins |
+| `BACKEND_PORT`, `FRONTEND_PORT` | Published host ports | `8000`, `5173` |
+| `VITE_API_URL`, `VITE_WS_URL` | Frontend REST and WebSocket endpoints | Local backend URLs |
+| `DETECTION_MODE` | `rule_based` or required `ml` detection | `rule_based` |
+| `ANOMALY_MODEL_BUNDLE` | Isolation Forest bundle path | `/app/ml/models/anomaly_bundle.joblib` |
+| `SEQUENCE_PREDICTION_MODE` | `optional` or `required` LSTM loading | `optional` |
+| `SEQUENCE_ARTIFACT_DIR` | Sequence model and preprocessor directory | `/app/ml/sequence_detection` |
+| `SEQUENCE_STATE_TTL_SECONDS` | Per-source Redis window TTL | `3600` |
+| `REMEDIATION_EXECUTION_MODE` | Remediation executor selection | `dry_run` only |
+| `REMEDIATION_ALLOW_DESTRUCTIVE` | Policy gate reserved for non-dry-run executors | `false` |
+
+## API
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/` | Basic backend status |
+| `GET` | `/health/live` | Process liveness |
+| `GET` | `/health` | Infrastructure, agent, topic, and model-mode readiness |
+| `GET` | `/alerts/` | Paginated recent logical incidents (`limit` up to 500, plus `skip`) |
+| `GET` | `/alerts/stats` | Incident counts and severity distribution |
+| `WS` | `/ws/live-alerts` | Final enriched events relayed through Redis pub/sub |
+
+FastAPI's interactive OpenAPI interface is available at `/docs`.
+
+## Development and testing
+
+### Python checks
 
 ```bash
-docker compose --profile training run --rm ml-training python ml/training/train_anomaly_model.py
-docker compose --profile training run --rm ml-training python ml/training/evaluate_anomaly_model.py
+python -m pip install -r requirements-dev.txt
+ruff check .
+python -m compileall -q agents backend common ml scripts tests
+python -m pytest -m "not integration" --cov
 ```
 
-Training writes `ml/models/anomaly_bundle.joblib`, containing the model,
-imputer, scaler, feature order, version metadata, and decision-function
-thresholds. Evaluation writes `ml/models/anomaly_evaluation.json` with
-precision, recall, F1, confusion matrix, false-positive rate, false-negative
-rate, and detection rate.
-
-Generated artifacts are ignored by Git but included in Docker build contexts.
-After training, set `DETECTION_MODE=ml` in `.env` and run
-`docker compose up -d --build detection-agent`. ML mode fails clearly when the
-bundle is missing or incompatible. The clean-clone `rule_based` mode reports
-`detection_method: rule_based_fallback` and `model_status: explicit_fallback`.
-The obsolete standalone model/scaler/feature `.pkl` files were removed because
-the runtime accepts only the validated all-in-one bundle.
-
-## LSTM Prediction Notes
-
-The sequence experiment uses the same ten numeric CICIDS flow fields at
-training and runtime. Attack labels, severity, label frequency, and synthetic
-repeat-offender flags are not model inputs. Labels are used only as the next
-event target and as historical context for the comparison-only Markov baseline.
-
-Source CSV files are assigned to train, validation, or test before sliding
-windows are created. Within each file, windows are built separately for a real
-source/session column when available; otherwise the source file is the explicit
-chronological boundary. No window crosses an entity or split boundary, and the
-imputer and scaler are fitted on training groups only.
-
-The previous 85.07% result is invalidated because it used label-derived
-features and randomly split overlapping windows. A replacement score is only
-recorded after evaluation on untouched source groups. Evaluation includes
-accuracy, macro and weighted F1, top-3 accuracy, per-class metrics/support, and
-a confusion matrix for both the LSTM and first-order Markov baseline.
-
-To enable the real LSTM path:
+### Frontend checks
 
 ```bash
-docker compose --profile training run --rm ml-training python ml/sequence_detection/generate_rich_sequences.py
-docker compose --profile training run --rm ml-training python ml/sequence_detection/train_lstm_model.py
-docker compose --profile training run --rm ml-training python scripts/evaluate_sequence_model.py
+cd frontend
+npm ci
+npm test
+npm run lint
+npm run build
 ```
 
-Training writes `sequence_dataset.npz`, `sequence_preprocessor.joblib`,
-`sequence_model.keras`, and machine-readable `sequence_evaluation.json` beside
-the versioned metadata. Set `SEQUENCE_PREDICTION_MODE=required` in `.env`, then
-run `docker compose up -d --build investigation-agent`. Required mode exits
-unless TensorFlow loads the complete compatible artifact set. Default
-`optional` mode keeps the unavailable reason visible in event metadata and
-readiness output and never substitutes a rule prediction. With a loaded model,
-predictions begin after five telemetry events from the same source.
-
-At runtime, Investigation stores each source identity in a separate bounded
-Redis list named `soc:sequence:<source-ip>`. Lists retain at most the configured
-sequence length and default to a one-hour TTL. State therefore survives agent
-restarts without allowing two source IPs to share a window. Redis failure stops
-processing and leaves the Kafka offset uncommitted for retry; it never falls
-back to an incomplete in-memory sequence. Successful predictions persist the
-top classes, primary confidence, sequence length, model version, and prediction
-timestamp in the alert's investigation metadata.
-
-## Remediation Safety Model
-
-Remediation remains simulation-only. Canonical schema `1.2` accepts only
-the typed actions `BLOCK_IP`, `RATE_LIMIT_IP`, `ISOLATE_USER`,
-`FLAG_USER_FOR_REVIEW`, `INCREASE_MONITORING`, `AUDIT_LOG`, and
-`ESCALATE_TO_ANALYST`. Each action has a deterministic ID derived from the
-incident, action type, target type, and normalized target, so replaying an event
-does not create a second logical response.
-
-IP targets are parsed with Python's `ipaddress` module before an action or argv
-preview is created. Missing, `unknown`, malformed, loopback, link-local,
-unspecified, and multicast addresses are never used for network-control
-actions. Valid private addresses are retained for realistic local demos, but
-only as dry-run targets; they receive the same approval classification as
-public addresses. User targets allow only a constrained identity character set.
-
-`BLOCK_IP`, `RATE_LIMIT_IP`, and `ISOLATE_USER` require approval for any
-non-dry-run executor. All other actions are automatic-safe. The repository ships
-only the `dry_run` executor, never invokes `shell=True` or `subprocess`, and
-stores display-only command previews as argument lists. Unsupported execution
-modes fail startup. `REMEDIATION_ALLOW_DESTRUCTIVE=false` remains the safe
-default for future executor implementations.
-
-Severity uses the shared `Severity` enum throughout detection, persistence,
-remediation, API statistics, and the dashboard. HIGH becomes CRITICAL only
-after an exact MITRE match with confidence of at least 0.90 corroborates an
-Impact or Privilege Escalation tactic, or after at least ten observed failed
-logins corroborate Credential Access. Fuzzy or predicted labels cannot trigger
-the promotion.
-
-## ATT&CK Enrichment
-
-The Threat Intelligence Agent uses the repository-local mapping version
-`2026-09-project-v1`. This identifies this project's small mapping table; it is
-not an official MITRE ATT&CK release identifier. Each enrichment stores separate
-technique ID, technique name, tactic, confidence, recommended action, match type,
-and evidence fields. Match type is one of `exact`, `predicted_class`, `fuzzy`, or
-`unknown`, so an analyst can audit which input caused the decision. Unknown
-results do not invent a technique ID.
-
-CICIDS labels and runtime predictions share `common/labels.py` normalization.
-This converts dash variants and damaged labels such as
-`Web Attack � Brute Force` to the canonical `Web Attack - Brute Force` before
-training, prediction display, or ATT&CK lookup.
-
-## Dashboard Features
-
-- Total alert, critical threat, and malware counters.
-- Severity distribution chart powered by backend analytics.
-- Live security alert table backed by PostgreSQL.
-- WebSocket-based threat feed powered by Redis pub/sub.
-- AI attack prediction panel for sequence-model outputs.
-- Responsive dark SOC interface built for quick analyst scanning.
-
-## API Surface
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /` | Backend status message |
-| `GET /health/live` | Backend process liveness |
-| `GET /health` | Dependency, topic, agent, and model readiness |
-| `GET /alerts/` | Recent persisted SOC alerts |
-| `GET /alerts/stats` | Dashboard counters and severity chart data |
-| `WS /ws/live-alerts` | Live threat feed stream |
-
-## Development Commands
-
-Pinned Python dependencies are separated by purpose:
-
-- `requirements-runtime.txt`: backend, Kafka agents, Redis, and anomaly runtime.
-- `requirements-sequence.txt`: runtime plus TensorFlow for Investigation.
-- `requirements-training.txt`: sequence dependencies plus Parquet support.
-- `requirements-dev.txt`: runtime plus Ruff, pytest, and coverage.
-
-Unused LightGBM, XGBoost, YARA, Capstone, Prometheus, HTTP clients, and frontend
-packages were removed because no current code path imports them.
-
-Apply database migrations without starting the full stack:
+### Database migrations
 
 ```bash
 docker compose run --rm migrate
 ```
 
-For a local Python environment with `DATABASE_URL` configured, the equivalent
-commands are:
+For a local Python environment with `DATABASE_URL` set:
 
 ```bash
 alembic upgrade head
 alembic current
 ```
 
-Create schema changes as new Alembic revisions. Runtime services only verify
-database connectivity; they do not call `create_all()` or repair tables with
-ad-hoc `ALTER TABLE` statements.
+### Compose integration test
 
-Run frontend checks:
+The smoke test injects a deterministic event, waits for final reporting, replays the same event, and verifies one incident, stable enrichment, deterministic actions, and one report.
 
 ```bash
-cd frontend
-npm test
-npm run lint
-npm run build
+docker compose -p ai-soc-integration --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml up -d --build
+docker compose -p ai-soc-integration --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml --profile test run --rm integration-test
+docker compose -p ai-soc-integration --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml down -v
 ```
 
-Run backend syntax checks:
+The GitHub Actions workflow runs Python linting, compilation, unit tests with coverage, frontend audit/tests/lint/build, and the Compose replay smoke test.
 
-```bash
-python -m py_compile backend/main.py backend/database.py backend/routes/alerts.py
+### Testing strategy
+
+- Domain and processor unit tests run without Kafka infinite loops.
+- Contract tests cover validation, identity preservation, serialization, timestamps, and feature order.
+- ML tests cover deterministic preprocessing, artifact validation, missing values, missing models, grouped sequence construction, and Redis state isolation.
+- Failure-path tests cover malformed Kafka messages, publish and persistence failures, Redis outages, and invalid model output without premature acknowledgement.
+- Persistence and reporting tests cover progressive enrichment and duplicate replay.
+- Frontend tests cover shared query caching, loading/error states, WebSocket invalidation, normalized API data, and sequence rendering.
+- The Compose integration test exercises the complete pipeline against Kafka, Redis, and PostgreSQL.
+
+## Repository structure
+
+```text
+.
+|-- agents/                  # Kafka worker entry points and testable processors
+|-- common/                  # Event, Kafka, health, label, and remediation contracts
+|-- backend/                 # FastAPI application, ORM model, REST, and WebSocket bridge
+|-- frontend/                # React analyst dashboard and frontend tests
+|-- ml/
+|   |-- features/            # Shared training/runtime network-flow preprocessing
+|   |-- models/              # Generated anomaly artifacts (not committed)
+|   |-- sequence_detection/  # Grouped sequence pipeline, predictor, and metadata
+|   `-- training/            # Offline anomaly preprocessing, training, and evaluation
+|-- alembic/                 # Versioned incident schema migrations
+|-- kafka/                   # Canonical local producer and observer utilities
+|-- scripts/                 # Traffic simulator and sequence evaluation entry point
+|-- tests/                   # Unit, persistence, ML, failure-path, and integration tests
+|-- .github/workflows/       # Continuous integration
+|-- docker-compose.yml       # Default local stack
+|-- docker-compose.dev.yml   # Optional infrastructure port exposure
+|-- docker-compose.test.yml  # Integration test service overrides
+`-- Dockerfile               # Runtime, sequence, test, and training image targets
 ```
 
-Run pipeline unit tests:
+## Current scope and limitations
 
-```bash
-pip install -r requirements-dev.txt
-ruff check .
-python -m pytest -m "not integration" --cov
-```
+- Telemetry is generated by the included simulator or prepared from local CICIDS2017 files; no live sensor, packet capture, SIEM, or EDR integration is included.
+- Generated model and evaluation artifacts are not committed. A clean clone uses explicit rule-based anomaly detection and reports the LSTM as unavailable until trained artifacts are supplied.
+- The committed sequence metadata requires retraining and does not contain a valid replacement benchmark.
+- The simulator keeps its synthetic attack label under `ground_truth`. In the default rule-based and model-unavailable configuration, ATT&CK enrichment can remain `unknown` because downstream processors correctly avoid using that hidden label as observed evidence.
+- ATT&CK enrichment uses a small repository-local mapping (`2026-09-project-v1`), not a live CTI feed or an official ATT&CK release dataset.
+- Remediation is dry-run only. It does not alter firewall, host, cloud, or identity state.
+- Docker Compose is a local, single-node topology with plaintext Kafka and one partition per topic; it is not a high-availability deployment.
+- The API and dashboard do not implement authentication or authorization and are intended for a trusted local environment.
+- Failed Kafka records retry in place; no dead-letter queue or operator workflow is included.
+- Reports and summaries are local JSON files in a Docker volume rather than a distributed report store.
+- The repository currently has no `LICENSE` file, so redistribution terms are not defined.
 
-Run the replay smoke test in an isolated Docker Compose stack:
+These boundaries keep the repository focused on event contracts, processing semantics, ML lifecycle discipline, and safe orchestration rather than claiming a deployable replacement for an enterprise SOC platform.
 
-```bash
-docker compose -p ai-soc-step7 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml up -d --build
-docker compose -p ai-soc-step7 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml --profile test run --rm integration-test
-docker compose -p ai-soc-step7 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml down -v
-```
+## Design decisions
 
-Follow useful logs:
+**Kafka instead of synchronous agent chaining.** Each stage owns a stable consumer group and can restart independently while Kafka provides buffering between processors.
 
-```bash
-docker compose logs -f backend detection-agent remediation-agent
-```
+**At-least-once delivery plus application idempotency.** The pipeline does not claim exactly-once transport. Stable IDs, deterministic outputs, manual commits, and database upserts make normal replay safe.
 
-Stop everything:
+**Redis only for ephemeral coordination.** Redis stores bounded per-source sequence windows and the transient live-feed channel; PostgreSQL remains the authoritative incident store.
 
-```bash
-docker compose down
-```
+**Shared preprocessing artifacts.** Detection and sequence runtime code load the same feature order, fitted imputation, and scaling state created by training, preventing training-serving skew.
 
-## What This Demonstrates
-
-- Building an event-driven system with multiple independently running workers.
-- Designing a backend that serves both REST analytics and WebSocket updates.
-- Evolving a replay-safe PostgreSQL incident schema through versioned Alembic migrations.
-- Connecting ML-driven detection outputs to a real-time analyst dashboard.
-- Packaging a complex system into a repeatable Docker Compose workflow.
-- Presenting technical work with a clean, recruiter-friendly frontend experience.
+**Dry-run remediation by default and by implementation.** Typed actions demonstrate policy-aware response planning without exposing the host to commands derived from untrusted event data.
 
 ## Author
 
-**Immanuel P**  
-B.Tech Computer Science Engineering  
-Focused on AI engineering, distributed systems, and cybersecurity automation.
+**Immanuel P**
