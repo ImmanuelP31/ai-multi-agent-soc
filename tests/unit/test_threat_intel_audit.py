@@ -74,6 +74,8 @@ def test_corrupted_and_variant_labels_share_one_normal_form():
 def test_training_preprocessing_uses_shared_label_normalization():
     data = {feature: [1.0] for feature in SEQUENCE_FEATURES}
     data["Label"] = ["Web Attack \ufffd Brute Force"]
+    data["Source IP"] = ["192.0.2.10"]
+    data["Destination IP"] = ["198.51.100.10"]
     frame = pd.DataFrame(data)
 
     prepared, _ = prepare_source_frame(frame, "legacy.csv")

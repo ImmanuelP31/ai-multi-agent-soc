@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -31,18 +32,31 @@ TARGET_COLUMN = "Label"
 SOURCE_GROUP_COLUMN = "_source_group"
 ENTITY_COLUMN = "_sequence_entity"
 ROW_ORDER_COLUMN = "_row_order"
-SEQUENCE_PIPELINE_VERSION = "sequence-telemetry-v2"
-PREPROCESSOR_ARTIFACT_VERSION = "sequence-preprocessor-v1"
-SEQUENCE_MODEL_VERSION = "lstm-next-event-v2"
-DATASET_ARTIFACT_VERSION = "grouped-sequences-v1"
+SOURCE_ID_COLUMN = "_source_identity"
+DESTINATION_ID_COLUMN = "_destination_identity"
+EVENT_TIME_COLUMN = "_event_time"
+DEFAULT_SESSION_GAP_SECONDS = 3600
+SEQUENCE_PIPELINE_VERSION = "sequence-telemetry-v3"
+PREPROCESSOR_ARTIFACT_VERSION = "sequence-preprocessor-v2"
+SEQUENCE_MODEL_VERSION = "lstm-next-event-v3"
+DATASET_ARTIFACT_VERSION = "session-grouped-sequences-v2"
 
-SOURCE_ENTITY_COLUMNS: tuple[str, ...] = (
+SOURCE_IP_COLUMNS: tuple[str, ...] = (
     "Source IP",
     "Src IP",
     "SourceIP",
     "src_ip",
-    "Flow ID",
-    "Session ID",
+)
+DESTINATION_IP_COLUMNS: tuple[str, ...] = (
+    "Destination IP",
+    "Dst IP",
+    "DestinationIP",
+    "dst_ip",
+)
+TIMESTAMP_COLUMNS: tuple[str, ...] = (
+    "Timestamp",
+    "Flow Timestamp",
+    "timestamp",
 )
 
 
@@ -63,9 +77,11 @@ class GroupSplit:
     def validate(self) -> None:
         train, validation, test = map(set, (self.train, self.validation, self.test))
         if not train or not validation or not test:
-            raise SequenceDataError("Train, validation, and test groups must be non-empty")
+            raise SequenceDataError(
+                "Train, validation, and test groups must be non-empty"
+            )
         if train & validation or train & test or validation & test:
-            raise SequenceDataError("Source groups must be disjoint across splits")
+            raise SequenceDataError("Sequence groups must be disjoint across splits")
 
 
 @dataclass
@@ -95,6 +111,7 @@ class SequenceDataset:
     split: GroupSplit
     label_mapping: dict[str, int]
     entity_columns: dict[str, str]
+    session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS
 
 
 @dataclass
@@ -145,16 +162,55 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _first_present_column(
+    columns: Iterable[str],
+    candidates: Iterable[str],
+) -> str | None:
+    available = set(columns)
+    return next((candidate for candidate in candidates if candidate in available), None)
+
+
+def _normalized_identity(series: pd.Series, name: str, source_group: str) -> pd.Series:
+    normalized = series.astype("string").str.strip()
+    if normalized.isna().any() or (normalized == "").any():
+        raise SequenceDataError(
+            f"{source_group} contains an empty {name}; endpoint grouping would be "
+            "ambiguous"
+        )
+    return normalized
+
+
 def prepare_source_frame(
     frame: pd.DataFrame,
     source_group: str,
+    *,
+    session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS,
 ) -> tuple[pd.DataFrame, str]:
-    """Validate one capture and assign a boundary-safe sequence entity."""
+    """Validate, order, and sessionize one rich CICIDS flow capture."""
+
+    if session_gap_seconds < 1:
+        raise SequenceDataError("session_gap_seconds must be positive")
 
     prepared = frame.copy()
     prepared.columns = prepared.columns.str.strip()
     if TARGET_COLUMN not in prepared:
         raise SequenceDataError(f"{source_group} is missing '{TARGET_COLUMN}'")
+
+    source_column = _first_present_column(prepared.columns, SOURCE_IP_COLUMNS)
+    destination_column = _first_present_column(
+        prepared.columns,
+        DESTINATION_IP_COLUMNS,
+    )
+    if source_column is None or destination_column is None:
+        missing = []
+        if source_column is None:
+            missing.append("Source IP")
+        if destination_column is None:
+            missing.append("Destination IP")
+        raise SequenceDataError(
+            f"{source_group} is not a rich flow export; missing endpoint columns: "
+            f"{missing}. Use CICIDS flows that retain source and destination identity."
+        )
 
     canonical = canonical_feature_frame(prepared)
     result = canonical.copy()
@@ -162,25 +218,77 @@ def prepare_source_frame(
     if (result[TARGET_COLUMN] == "").any():
         raise SequenceDataError(f"{source_group} contains an empty target label")
 
-    entity_column = next(
-        (name for name in SOURCE_ENTITY_COLUMNS if name in prepared.columns),
-        None,
+    result[SOURCE_ID_COLUMN] = _normalized_identity(
+        prepared[source_column],
+        source_column,
+        source_group,
     )
-    if entity_column is None:
-        entity_values = pd.Series(source_group, index=prepared.index, dtype="object")
-        entity_strategy = "source_file"
-    else:
-        entity_values = prepared[entity_column].astype("string").fillna("missing")
-        entity_strategy = entity_column
-
+    result[DESTINATION_ID_COLUMN] = _normalized_identity(
+        prepared[destination_column],
+        destination_column,
+        source_group,
+    )
     result[SOURCE_GROUP_COLUMN] = source_group
-    result[ENTITY_COLUMN] = source_group + "::" + entity_values.astype(str)
     result[ROW_ORDER_COLUMN] = np.arange(len(result), dtype=np.int64)
-    return result.reset_index(drop=True), entity_strategy
+
+    timestamp_column = _first_present_column(prepared.columns, TIMESTAMP_COLUMNS)
+    if timestamp_column is not None:
+        timestamps = pd.to_datetime(
+            prepared[timestamp_column],
+            errors="coerce",
+            utc=True,
+            format="mixed",
+        )
+        if timestamps.isna().any():
+            invalid_count = int(timestamps.isna().sum())
+            raise SequenceDataError(
+                f"{source_group} contains {invalid_count} invalid values in "
+                f"'{timestamp_column}'"
+            )
+        result[EVENT_TIME_COLUMN] = timestamps
+        result = result.sort_values(
+            [
+                SOURCE_ID_COLUMN,
+                EVENT_TIME_COLUMN,
+                DESTINATION_ID_COLUMN,
+                ROW_ORDER_COLUMN,
+            ],
+            kind="stable",
+        ).reset_index(drop=True)
+        gaps = (
+            result.groupby(SOURCE_ID_COLUMN, sort=False)[EVENT_TIME_COLUMN]
+            .diff()
+            .dt.total_seconds()
+            .gt(session_gap_seconds)
+        )
+        session_numbers = gaps.groupby(result[SOURCE_ID_COLUMN]).cumsum().astype(int)
+        ordering_strategy = (
+            f"{source_column} ordered by {timestamp_column}; "
+            f"new session after {session_gap_seconds}s inactivity"
+        )
+    else:
+        result = result.sort_values(
+            [SOURCE_ID_COLUMN, ROW_ORDER_COLUMN],
+            kind="stable",
+        ).reset_index(drop=True)
+        session_numbers = pd.Series(0, index=result.index, dtype="int64")
+        ordering_strategy = f"{source_column} using stable source row order"
+
+    result[ENTITY_COLUMN] = (
+        source_group
+        + "::"
+        + result[SOURCE_ID_COLUMN].astype(str)
+        + "::session-"
+        + session_numbers.astype(str)
+    )
+    result[ROW_ORDER_COLUMN] = result.groupby(ENTITY_COLUMN, sort=False).cumcount()
+    return result.reset_index(drop=True), ordering_strategy
 
 
 def load_source_frames(
     paths: Iterable[str | Path],
+    *,
+    session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
     frames: dict[str, pd.DataFrame] = {}
     entity_columns: dict[str, str] = {}
@@ -191,6 +299,7 @@ def load_source_frames(
         frame, entity_strategy = prepare_source_frame(
             pd.read_csv(raw_path, low_memory=False),
             source_group,
+            session_gap_seconds=session_gap_seconds,
         )
         frames[source_group] = frame
         entity_columns[source_group] = entity_strategy
@@ -199,19 +308,56 @@ def load_source_frames(
     return frames, entity_columns
 
 
-def split_source_groups(
-    groups: Iterable[str],
+def _eligible_entity_targets(
+    frames: Mapping[str, pd.DataFrame],
+    sequence_length: int,
+) -> dict[str, Counter[str]]:
+    support: dict[str, Counter[str]] = {}
+    for frame in frames.values():
+        for entity, entity_frame in frame.groupby(ENTITY_COLUMN, sort=False):
+            ordered = entity_frame.sort_values(ROW_ORDER_COLUMN, kind="stable")
+            targets = ordered[TARGET_COLUMN].iloc[sequence_length:]
+            if not targets.empty:
+                support[str(entity)] = Counter(str(value) for value in targets)
+    return support
+
+
+def split_entity_groups(
+    frames: Mapping[str, pd.DataFrame],
     *,
     random_state: int = 42,
+    sequence_length: int = SEQUENCE_LENGTH,
+    max_attempts: int = 4096,
 ) -> GroupSplit:
-    """Split independent source files before any overlapping windows exist."""
+    """Assign whole endpoint sessions while preserving class coverage."""
 
-    ordered = sorted(set(groups))
+    entity_support = _eligible_entity_targets(frames, sequence_length)
+    ordered = sorted(entity_support)
     if len(ordered) < 3:
         raise SequenceDataError(
-            "At least three independent source files are required for group splits"
+            "At least three endpoint sessions with enough rows for a sequence are "
+            "required"
         )
-    random.Random(random_state).shuffle(ordered)
+
+    classes = sorted(
+        {label for support in entity_support.values() for label in support}
+    )
+    groups_per_class = {
+        label: sum(label in support for support in entity_support.values())
+        for label in classes
+    }
+    insufficient = {
+        label: count for label, count in groups_per_class.items() if count < 3
+    }
+    if insufficient:
+        details = ", ".join(
+            f"{label}={count}" for label, count in sorted(insufficient.items())
+        )
+        raise SequenceDataError(
+            "Class-aware session splitting requires every target class in at least "
+            f"three eligible sessions; found {details}"
+        )
+
     test_count = max(1, round(len(ordered) * 0.2))
     validation_count = max(1, round(len(ordered) * 0.2))
     while len(ordered) - test_count - validation_count < 1:
@@ -222,13 +368,75 @@ def split_source_groups(
         else:
             raise SequenceDataError("Could not create three non-empty group splits")
 
-    split = GroupSplit(
-        train=tuple(sorted(ordered[: -test_count - validation_count])),
-        validation=tuple(sorted(ordered[-test_count - validation_count : -test_count])),
-        test=tuple(sorted(ordered[-test_count:])),
-    )
-    split.validate()
-    return split
+    target_ratios = {"train": 0.6, "validation": 0.2, "test": 0.2}
+    total_windows = sum(sum(support.values()) for support in entity_support.values())
+    class_totals = {
+        label: sum(support[label] for support in entity_support.values())
+        for label in classes
+    }
+    rng = random.Random(random_state)
+    best: tuple[float, GroupSplit] | None = None
+
+    for _ in range(max_attempts):
+        candidate = ordered.copy()
+        rng.shuffle(candidate)
+        candidate_split = GroupSplit(
+            train=tuple(sorted(candidate[: -test_count - validation_count])),
+            validation=tuple(
+                sorted(candidate[-test_count - validation_count : -test_count])
+            ),
+            test=tuple(sorted(candidate[-test_count:])),
+        )
+        split_groups = {
+            "train": candidate_split.train,
+            "validation": candidate_split.validation,
+            "test": candidate_split.test,
+        }
+        if any(
+            any(
+                sum(entity_support[group][label] for group in groups) == 0
+                for label in classes
+            )
+            for groups in split_groups.values()
+        ):
+            continue
+
+        score = 0.0
+        for split_name, groups in split_groups.items():
+            expected_ratio = target_ratios[split_name]
+            split_total = sum(sum(entity_support[group].values()) for group in groups)
+            score += abs((split_total / total_windows) - expected_ratio)
+            for label in classes:
+                split_class_total = sum(
+                    entity_support[group][label] for group in groups
+                )
+                score += abs((split_class_total / class_totals[label]) - expected_ratio)
+
+        if best is None or score < best[0]:
+            best = (score, candidate_split)
+
+    if best is None:
+        raise SequenceDataError(
+            "Could not find a whole-session train/validation/test assignment with "
+            f"complete class coverage after {max_attempts} deterministic attempts"
+        )
+
+    best[1].validate()
+    return best[1]
+
+
+def frames_for_groups(
+    frames: Mapping[str, pd.DataFrame],
+    groups: Iterable[str],
+) -> dict[str, pd.DataFrame]:
+    selected = set(groups)
+    result = {
+        source_group: frame[frame[ENTITY_COLUMN].isin(selected)].copy()
+        for source_group, frame in frames.items()
+    }
+    return {
+        source_group: frame for source_group, frame in result.items() if not frame.empty
+    }
 
 
 def fit_label_mapping(frames: Iterable[pd.DataFrame]) -> dict[str, int]:
@@ -246,6 +454,8 @@ def fit_label_mapping(frames: Iterable[pd.DataFrame]) -> dict[str, int]:
 
 def fit_sequence_preprocessor(
     training_frames: Mapping[str, pd.DataFrame],
+    *,
+    training_groups: Iterable[str] | None = None,
 ) -> SequencePreprocessor:
     if not training_frames:
         raise SequenceDataError("No training frames were provided")
@@ -263,11 +473,18 @@ def fit_sequence_preprocessor(
     imputed = imputer.fit_transform(canonical)
     scaler = StandardScaler()
     scaler.fit(imputed)
+    fitted_groups = tuple(
+        sorted(
+            training_groups
+            if training_groups is not None
+            else training[ENTITY_COLUMN].astype(str).unique()
+        )
+    )
     preprocessor = SequencePreprocessor(
         imputer=imputer,
         scaler=scaler,
         feature_names=SEQUENCE_FEATURES,
-        training_groups=tuple(sorted(training_frames)),
+        training_groups=fitted_groups,
         training_rows=len(training),
     )
     preprocessor.validate()
@@ -314,7 +531,7 @@ def build_sequences(
             sequence_blocks.append(windows.transpose(0, 2, 1).copy())
             target_blocks.append(encoded[sequence_length:])
             previous_blocks.append(encoded[sequence_length - 1 : -1])
-            source_group_blocks.append(np.repeat(source_group, window_count))
+            source_group_blocks.append(np.repeat(str(entity), window_count))
             entity_blocks.append(np.repeat(str(entity), window_count))
 
     if sequence_blocks:
@@ -348,24 +565,37 @@ def prepare_sequence_dataset(
     *,
     random_state: int = 42,
     sequence_length: int = SEQUENCE_LENGTH,
+    session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS,
 ) -> tuple[SequenceDataset, SequencePreprocessor]:
-    frames, entity_columns = load_source_frames(paths)
-    split = split_source_groups(frames, random_state=random_state)
-    label_mapping = fit_label_mapping(frames.values())
-    train_frames = {group: frames[group] for group in split.train}
-    preprocessor = fit_sequence_preprocessor(train_frames)
+    frames, entity_columns = load_source_frames(
+        paths,
+        session_gap_seconds=session_gap_seconds,
+    )
+    split = split_entity_groups(
+        frames,
+        random_state=random_state,
+        sequence_length=sequence_length,
+    )
+    train_frames = frames_for_groups(frames, split.train)
+    validation_frames = frames_for_groups(frames, split.validation)
+    test_frames = frames_for_groups(frames, split.test)
+    label_mapping = fit_label_mapping(train_frames.values())
+    preprocessor = fit_sequence_preprocessor(
+        train_frames,
+        training_groups=split.train,
+    )
     dataset = SequenceDataset(
         train=build_sequences(
             train_frames, preprocessor, label_mapping, sequence_length=sequence_length
         ),
         validation=build_sequences(
-            {group: frames[group] for group in split.validation},
+            validation_frames,
             preprocessor,
             label_mapping,
             sequence_length=sequence_length,
         ),
         test=build_sequences(
-            {group: frames[group] for group in split.test},
+            test_frames,
             preprocessor,
             label_mapping,
             sequence_length=sequence_length,
@@ -373,7 +603,9 @@ def prepare_sequence_dataset(
         split=split,
         label_mapping=label_mapping,
         entity_columns=entity_columns,
+        session_gap_seconds=session_gap_seconds,
     )
+    validate_dataset_class_coverage(dataset)
     return dataset, preprocessor
 
 
@@ -383,6 +615,52 @@ def class_support(y: np.ndarray, label_mapping: Mapping[str, int]) -> dict[str, 
         label: int(counts[index])
         for label, index in sorted(label_mapping.items(), key=lambda item: item[1])
     }
+
+
+def dataset_class_support(dataset: SequenceDataset) -> dict[str, dict[str, int]]:
+    return {
+        "train": class_support(dataset.train.y, dataset.label_mapping),
+        "validation": class_support(dataset.validation.y, dataset.label_mapping),
+        "test": class_support(dataset.test.y, dataset.label_mapping),
+    }
+
+
+def validate_class_coverage(
+    support: Mapping[str, Mapping[str, int]],
+    labels: Iterable[str],
+) -> None:
+    missing = {
+        split_name: [label for label in labels if split.get(label, 0) <= 0]
+        for split_name, split in support.items()
+    }
+    missing = {split: labels for split, labels in missing.items() if labels}
+    if missing:
+        details = "; ".join(
+            f"{split}: {', '.join(labels)}" for split, labels in missing.items()
+        )
+        raise SequenceDataError(
+            "Every target class must have sequence examples in train, validation, "
+            f"and test; missing support in {details}"
+        )
+
+
+def validate_dataset_class_coverage(dataset: SequenceDataset) -> None:
+    validate_class_coverage(
+        dataset_class_support(dataset),
+        dataset.label_mapping,
+    )
+
+
+def validate_array_class_coverage(
+    arrays: Mapping[str, np.ndarray],
+    label_mapping: Mapping[str, int],
+) -> dict[str, dict[str, int]]:
+    support = {
+        split_name: class_support(arrays[f"y_{split_name}"], label_mapping)
+        for split_name in ("train", "validation", "test")
+    }
+    validate_class_coverage(support, label_mapping)
+    return support
 
 
 def create_metadata(
@@ -406,11 +684,13 @@ def create_metadata(
         "num_classes": len(dataset.label_mapping),
         "class_mapping": dict(dataset.label_mapping),
         "split_strategy": (
-            "Source CSV files are split before windows with a seeded 60/20/20 "
-            "group split. Windows are then built independently per source/session "
-            "entity and never cross a file or entity boundary."
+            "Flows are ordered within source endpoints, divided into inactivity-"
+            "bounded sessions, and assigned as whole sessions using a seeded "
+            "class-aware 60/20/20 split before windows are generated."
         ),
         "split_random_state": random_state,
+        "session_gap_seconds": dataset.session_gap_seconds,
+        "class_coverage_validated": True,
         "train_groups": list(dataset.split.train),
         "validation_groups": list(dataset.split.validation),
         "test_groups": list(dataset.split.test),
@@ -420,12 +700,11 @@ def create_metadata(
             "validation_sequences": len(dataset.validation.y),
             "test_sequences": len(dataset.test.y),
             "training_preprocessing_rows": preprocessor.training_rows,
+            "train_sessions": len(dataset.split.train),
+            "validation_sessions": len(dataset.split.validation),
+            "test_sessions": len(dataset.split.test),
         },
-        "class_support": {
-            "train": class_support(dataset.train.y, dataset.label_mapping),
-            "validation": class_support(dataset.validation.y, dataset.label_mapping),
-            "test": class_support(dataset.test.y, dataset.label_mapping),
-        },
+        "class_support": dataset_class_support(dataset),
         "preprocessor": {
             "artifact": "sequence_preprocessor.joblib",
             "version": preprocessor.artifact_version,
@@ -463,6 +742,28 @@ def validate_metadata(
     recorded_mapping = metadata.get("class_mapping")
     if recorded_mapping is not None and dict(recorded_mapping) != mapping:
         raise SequenceArtifactError("Metadata and label mapping disagree")
+    if metadata.get("status") == "requires_retraining":
+        return
+
+    groups = {
+        split_name: tuple(metadata.get(f"{split_name}_groups", ()))
+        for split_name in ("train", "validation", "test")
+    }
+    try:
+        GroupSplit(**groups).validate()
+    except SequenceDataError as exc:
+        raise SequenceArtifactError(str(exc)) from exc
+    if metadata.get("class_coverage_validated") is not True:
+        raise SequenceArtifactError("Class coverage was not validated")
+    try:
+        validate_class_coverage(metadata.get("class_support", {}), mapping)
+    except SequenceDataError as exc:
+        raise SequenceArtifactError(str(exc)) from exc
+    fitted_groups = tuple(metadata.get("preprocessor", {}).get("fitted_on_groups", ()))
+    if sorted(fitted_groups) != sorted(groups["train"]):
+        raise SequenceArtifactError(
+            "Preprocessor provenance does not match metadata train groups"
+        )
 
 
 def save_preprocessor(preprocessor: SequencePreprocessor, path: str | Path) -> Path:
@@ -584,9 +885,7 @@ def evaluate_probabilities(
         "per_class": per_class,
         "support": {name: values["support"] for name, values in per_class.items()},
         "total_support": int(len(y_true)),
-        "confusion_matrix": confusion_matrix(
-            y_true, predicted, labels=labels
-        ).tolist(),
+        "confusion_matrix": confusion_matrix(y_true, predicted, labels=labels).tolist(),
     }
 
 
@@ -608,7 +907,9 @@ class MarkovBaseline:
             transitions[int(previous), int(target)] += 1.0
             class_counts[int(target)] += 1.0
         if class_counts.sum() == 0:
-            raise SequenceDataError("Cannot fit Markov baseline without training windows")
+            raise SequenceDataError(
+                "Cannot fit Markov baseline without training windows"
+            )
         return cls(transitions, class_counts)
 
     def predict_proba(self, previous_class: np.ndarray) -> np.ndarray:

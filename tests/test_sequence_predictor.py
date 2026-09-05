@@ -75,6 +75,8 @@ def training_preprocessor():
         for index, feature in enumerate(SEQUENCE_FEATURES)
     }
     data["Label"] = ["BENIGN", "DDoS"] * (rows // 2)
+    data["Source IP"] = ["10.0.0.254"] * rows
+    data["Destination IP"] = ["192.0.2.254"] * rows
     frame, _ = prepare_source_frame(pd.DataFrame(data), "train.csv")
     return fit_sequence_preprocessor({"train.csv": frame})
 
@@ -128,7 +130,18 @@ class SequencePredictorTests(unittest.TestCase):
             "num_classes": len(mapping),
             "class_mapping": mapping,
             "model_artifact": "sequence_model.keras",
-            "preprocessor": {"artifact": "sequence_preprocessor.joblib"},
+            "class_coverage_validated": True,
+            "train_groups": list(preprocessor.training_groups),
+            "validation_groups": ["validation-session"],
+            "test_groups": ["test-session"],
+            "class_support": {
+                split: {label: 1 for label in mapping}
+                for split in ("train", "validation", "test")
+            },
+            "preprocessor": {
+                "artifact": "sequence_preprocessor.joblib",
+                "fitted_on_groups": list(preprocessor.training_groups),
+            },
         }
 
         with tempfile.TemporaryDirectory() as directory:

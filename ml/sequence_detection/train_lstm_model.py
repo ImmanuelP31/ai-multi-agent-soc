@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from sklearn.utils.class_weight import compute_class_weight
@@ -22,6 +23,7 @@ from ml.sequence_detection.pipeline import (
     evaluate_probabilities,
     load_dataset_artifact,
     load_preprocessor,
+    validate_array_class_coverage,
     validate_metadata,
 )
 
@@ -35,21 +37,53 @@ METRICS_PATH = THIS_DIR / "sequence_evaluation.json"
 RANDOM_STATE = 42
 
 
-def load_training_artifacts() -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    if not METADATA_PATH.is_file():
+def artifact_paths(artifact_dir: str | Path) -> dict[str, Path]:
+    directory = Path(artifact_dir).resolve()
+    return {
+        "dataset": directory / DATASET_PATH.name,
+        "preprocessor": directory / PREPROCESSOR_PATH.name,
+        "metadata": directory / METADATA_PATH.name,
+        "mapping": directory / "label_mapping.json",
+        "model": directory / MODEL_PATH.name,
+        "metrics": directory / METRICS_PATH.name,
+    }
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train and evaluate the leakage-safe next-event LSTM"
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=THIS_DIR,
+        help="Directory containing generated artifacts and receiving model outputs",
+    )
+    return parser.parse_args(argv)
+
+
+def load_training_artifacts(
+    artifact_dir: str | Path = THIS_DIR,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    paths = artifact_paths(artifact_dir)
+    if not paths["metadata"].is_file():
         raise FileNotFoundError(
-            f"Sequence metadata is missing: {METADATA_PATH}. "
+            f"Sequence metadata is missing: {paths['metadata']}. "
             "Run generate_rich_sequences.py first."
         )
-    with open(METADATA_PATH, encoding="utf-8") as file:
+    with open(paths["metadata"], encoding="utf-8") as file:
         metadata = json.load(file)
-    with open(THIS_DIR / "label_mapping.json", encoding="utf-8") as file:
+    with open(paths["mapping"], encoding="utf-8") as file:
         label_mapping = json.load(file)
     validate_metadata(metadata, label_mapping)
-    preprocessor = load_preprocessor(PREPROCESSOR_PATH)
+    preprocessor = load_preprocessor(paths["preprocessor"])
     if list(preprocessor.training_groups) != metadata["train_groups"]:
         raise ValueError("Preprocessor provenance does not match metadata train groups")
-    return load_dataset_artifact(DATASET_PATH), metadata
+    arrays = load_dataset_artifact(paths["dataset"])
+    actual_support = validate_array_class_coverage(arrays, label_mapping)
+    if actual_support != metadata["class_support"]:
+        raise ValueError("Dataset class support does not match metadata")
+    return arrays, metadata
 
 
 def build_model(sequence_length: int, num_features: int, num_classes: int):
@@ -91,8 +125,9 @@ def calculate_class_weights(y_train: np.ndarray) -> dict[int, float]:
     return {int(label): float(weight) for label, weight in zip(present, weights)}
 
 
-def train() -> dict[str, Any]:
-    arrays, metadata = load_training_artifacts()
+def train(artifact_dir: str | Path = THIS_DIR) -> dict[str, Any]:
+    paths = artifact_paths(artifact_dir)
+    arrays, metadata = load_training_artifacts(artifact_dir)
     X_train = arrays["X_train"]
     y_train = arrays["y_train"]
     X_validation = arrays["X_validation"]
@@ -190,15 +225,15 @@ def train() -> dict[str, Any]:
         "comparison": comparison,
     }
 
-    model.save(MODEL_PATH)
-    with open(METRICS_PATH, "w", encoding="utf-8") as file:
+    model.save(paths["model"])
+    with open(paths["metrics"], "w", encoding="utf-8") as file:
         json.dump(evaluation, file, indent=2)
 
     metadata.update(
         {
             "status": "trained",
             "trained_at": datetime.now(timezone.utc).isoformat(),
-            "model_artifact": MODEL_PATH.name,
+            "model_artifact": paths["model"].name,
             "training": {
                 "epochs_completed": len(history.history["loss"]),
                 "batch_size": 128,
@@ -213,7 +248,7 @@ def train() -> dict[str, Any]:
         }
     )
     validate_metadata(metadata, metadata["class_mapping"])
-    with open(METADATA_PATH, "w", encoding="utf-8") as file:
+    with open(paths["metadata"], "w", encoding="utf-8") as file:
         json.dump(metadata, file, indent=2)
 
     print("\nHeld-out test comparison")
@@ -233,10 +268,10 @@ def train() -> dict[str, Any]:
         print("  Result: LSTM improves on the Markov baseline by macro F1.")
     else:
         print("  Result: LSTM does not improve on the Markov baseline by macro F1.")
-    print(f"\nModel: {MODEL_PATH}")
-    print(f"Metrics: {METRICS_PATH}")
+    print(f"\nModel: {paths['model']}")
+    print(f"Metrics: {paths['metrics']}")
     return evaluation
 
 
 if __name__ == "__main__":
-    train()
+    train(parse_args().artifact_dir)

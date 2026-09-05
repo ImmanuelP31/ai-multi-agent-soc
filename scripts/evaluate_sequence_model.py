@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 import sys
+from typing import Sequence
 
 _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
@@ -15,6 +17,7 @@ from ml.sequence_detection.pipeline import (
     evaluate_probabilities,
     load_dataset_artifact,
     load_preprocessor,
+    validate_array_class_coverage,
     validate_metadata,
 )
 
@@ -22,21 +25,36 @@ from ml.sequence_detection.pipeline import (
 ARTIFACT_DIR = _repo_root / "ml" / "sequence_detection"
 
 
-def main() -> None:
-    with open(ARTIFACT_DIR / "metadata.json", encoding="utf-8") as file:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Evaluate a trained sequence model and Markov baseline"
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=ARTIFACT_DIR,
+        help="Directory containing the generated and trained sequence artifacts",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    artifact_dir = parse_args(argv).artifact_dir.resolve()
+    with open(artifact_dir / "metadata.json", encoding="utf-8") as file:
         metadata = json.load(file)
-    with open(ARTIFACT_DIR / "label_mapping.json", encoding="utf-8") as file:
+    with open(artifact_dir / "label_mapping.json", encoding="utf-8") as file:
         label_mapping = json.load(file)
     validate_metadata(metadata, label_mapping)
-    load_preprocessor(ARTIFACT_DIR / "sequence_preprocessor.joblib")
-    arrays = load_dataset_artifact(ARTIFACT_DIR / "sequence_dataset.npz")
+    load_preprocessor(artifact_dir / "sequence_preprocessor.joblib")
+    arrays = load_dataset_artifact(artifact_dir / "sequence_dataset.npz")
+    validate_array_class_coverage(arrays, label_mapping)
 
     try:
         from tensorflow.keras.models import load_model
     except ImportError as exc:
         raise RuntimeError("TensorFlow is required to evaluate the LSTM") from exc
 
-    model_path = ARTIFACT_DIR / str(metadata["model_artifact"])
+    model_path = artifact_dir / str(metadata["model_artifact"])
     if not model_path.is_file() or metadata.get("status") != "trained":
         raise FileNotFoundError(
             f"A trained compatible model is required at {model_path}. "

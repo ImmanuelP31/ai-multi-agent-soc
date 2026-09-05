@@ -1,9 +1,9 @@
 {
   "status": "requires_retraining",
-  "model_version": "lstm-next-event-v2",
-  "sequence_pipeline_version": "sequence-telemetry-v2",
-  "dataset_artifact_version": "grouped-sequences-v1",
-  "preprocessing_artifact_version": "sequence-preprocessor-v1",
+  "model_version": "lstm-next-event-v3",
+  "sequence_pipeline_version": "sequence-telemetry-v3",
+  "dataset_artifact_version": "session-grouped-sequences-v2",
+  "preprocessing_artifact_version": "sequence-preprocessor-v2",
   "sequence_length": 5,
   "num_features": 10,
   "feature_columns": [
@@ -37,21 +37,27 @@
     "Web Attack - SQL Injection": 13,
     "Web Attack - XSS": 14
   },
-  "split_strategy": "Source CSV files are split before windows with a seeded 60/20/20 group split. Windows are then built independently per source/session entity and never cross a file or entity boundary.",
+  "split_strategy": "Flows are ordered within source endpoints, divided into inactivity-bounded sessions, and assigned as whole sessions using a seeded class-aware 60/20/20 split before windows are generated.",
   "split_random_state": 42,
+  "session_gap_seconds": 3600,
+  "class_coverage_validated": false,
   "train_groups": [],
   "validation_groups": [],
   "test_groups": [],
   "entity_columns": {},
   "dataset_sizes": null,
+  "class_support": null,
   "preprocessor": {
     "artifact": "sequence_preprocessor.joblib",
-    "version": "sequence-preprocessor-v1",
+    "version": "sequence-preprocessor-v2",
     "fitted_on_groups": [],
     "training_rows": 0
   },
   "model_artifact": "sequence_model.keras",
   "test_metrics": null,
   "baseline_metrics": null,
-  "invalidated_result": "The previous 85.07% score used label-derived features and a random split of overlapping windows, so it is not retained as a valid result."
+  "invalidated_results": [
+    "The previous 85.07% score used label-derived features and a random split of overlapping windows, so it is not retained as a valid result.",
+    "The reduced eight-file export produced train, validation, and test partitions with disjoint attack classes, so artifacts generated from it were discarded before training."
+  ]
 }

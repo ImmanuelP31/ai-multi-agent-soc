@@ -16,6 +16,7 @@
 **/dist/
 
 datasets/
+ml/datasets/
 data/
 checkpoints/
 weights/
@@ -25,10 +26,12 @@ weights/
 *.mov
 *.mkv
 *.csv
+**/*.csv
 *.zip
 *.pt
 *.pth
 *.onnx
+ml/sequence_detection/sequence_dataset.npz
 
 logs/
 temp/

@@ -135,9 +135,9 @@ Evaluation writes precision, recall, F1, a confusion matrix, false-positive rate
 
 ### Sequence prediction
 
-The LSTM predicts the next event class from sequences of five transformed network-flow observations. It uses the same feature contract as anomaly detection and excludes attack labels, severity, label frequency, and synthetic repeat-offender flags from `X`.
+The LSTM predicts the next event class from sequences of five transformed network-flow observations. It uses the same feature contract as anomaly detection and excludes endpoint identity, timestamps, attack labels, severity, label frequency, and synthetic repeat-offender flags from `X`.
 
-Source capture files are assigned to train, validation, and test groups before overlapping windows are built. Windows remain inside a source/session entity when the dataset exposes one; otherwise the source file is the documented chronological boundary. Imputation and scaling are fitted on training groups only and reused by validation, test, and runtime inference.
+Sequence generation requires rich CICIDS flow exports containing `Source IP`, `Destination IP`, and preferably `Timestamp`. Flows are ordered per source endpoint, divided into inactivity-bounded sessions, and assigned as whole sessions to train, validation, and test before overlapping windows are built. Generation aborts unless every target class has sequence support in all three splits. Imputation and scaling are fitted on training sessions only and reused by validation, test, and runtime inference.
 
 Training records accuracy, macro F1, weighted F1, top-3 accuracy, per-class precision/recall/F1, support, and a confusion matrix. A first-order Markov model is evaluated on the same held-out test groups. The versioned [`metadata.json`](ml/sequence_detection/metadata.json) currently has `status: requires_retraining` and contains no replacement metrics, so no LSTM score is presented here.
 
@@ -145,7 +145,7 @@ At runtime, Investigation uses one bounded Redis list per source identity and su
 
 ### Build model artifacts
 
-Place the expected CICIDS2017 CSV files in `ml/datasets/`, then run the relevant workflow:
+Place the expected CICIDS2017 CSV files in `ml/datasets/`, then run the relevant workflow. Sequence training needs the rich flow export; reduced 79-column machine-learning CSVs without endpoint identity are rejected.
 
 ```bash
 # Anomaly bundle
@@ -155,9 +155,9 @@ docker compose --profile training run --rm ml-training python ml/training/train_
 docker compose --profile training run --rm ml-training python ml/training/evaluate_anomaly_model.py
 
 # Sequence model, preprocessor, metadata, and evaluation
-docker compose --profile training run --rm ml-training python ml/sequence_detection/generate_rich_sequences.py
-docker compose --profile training run --rm ml-training python ml/sequence_detection/train_lstm_model.py
-docker compose --profile training run --rm ml-training python scripts/evaluate_sequence_model.py
+docker compose --profile training run --rm ml-training python ml/sequence_detection/generate_rich_sequences.py --dataset-dir ml/datasets --output-dir ml/sequence_detection
+docker compose --profile training run --rm ml-training python ml/sequence_detection/train_lstm_model.py --artifact-dir ml/sequence_detection
+docker compose --profile training run --rm ml-training python scripts/evaluate_sequence_model.py --artifact-dir ml/sequence_detection
 ```
 
 Artifact requirements and runtime behavior are documented in [`ml/models/README.md`](ml/models/README.md) and [`ml/sequence_detection/ARTIFACTS.md`](ml/sequence_detection/ARTIFACTS.md).
