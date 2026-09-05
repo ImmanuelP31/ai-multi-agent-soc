@@ -288,6 +288,7 @@ def print_actions(event: SOCEvent) -> None:
 
 def main() -> None:
     from backend.database import init_db, persist_event
+    from common.health import start_health_server
     from common.kafka import (
         consume_forever,
         create_consumer,
@@ -296,10 +297,12 @@ def main() -> None:
     )
     from common.pipeline import run_stage
 
+    health = start_health_server("remediation-agent")
     processor = RemediationProcessor()
     consumer = create_consumer("threat_enriched_alerts", "soc-remediation")
     producer = create_producer()
     init_db()
+    health.set_ready(processor="remediation-policy")
     print("Remediation Agent Running...\n")
 
     def handle(payload: dict) -> None:

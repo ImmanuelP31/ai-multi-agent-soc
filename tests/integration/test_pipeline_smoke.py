@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from common.events import SOCEvent, TelemetryPayload
-from common.kafka import create_producer, publish_event
+from common.kafka import SOC_TOPICS, check_kafka, create_producer, publish_event
 
 
 pytestmark = [
@@ -49,6 +49,8 @@ def wait_for_reporting(engine, previous_updated_at=None):
 
 
 def test_replayed_event_produces_one_enriched_incident_and_report():
+    assert set(SOC_TOPICS).issubset(check_kafka())
+
     engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
     event = SOCEvent.create_ingested(
         event="port_scan",

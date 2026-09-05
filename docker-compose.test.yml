@@ -3,14 +3,6 @@ services:
     environment:
       DETECTION_MODE: rule_based
 
-  remediation-agent:
-    volumes:
-      - test_logs:/app/logs
-
-  reporting-agent:
-    volumes:
-      - test_logs:/app/logs
-
   integration-test:
     build:
       context: .
@@ -18,24 +10,20 @@ services:
     profiles: ["test"]
     depends_on:
       detection-agent:
-        condition: service_started
+        condition: service_healthy
       investigation-agent:
-        condition: service_started
+        condition: service_healthy
       threat-intel-agent:
-        condition: service_started
+        condition: service_healthy
       remediation-agent:
-        condition: service_started
+        condition: service_healthy
       reporting-agent:
-        condition: service_started
+        condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://socuser:socpass@postgres:5432/socdb
+      DATABASE_URL: postgresql://${POSTGRES_USER:-socuser}:${POSTGRES_PASSWORD:-change-this-local-password}@postgres:5432/${POSTGRES_DB:-socdb}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       PIPELINE_TIMEOUT_SECONDS: "60"
       RUN_INTEGRATION: "1"
     volumes:
-      - .:/app
-      - test_logs:/app/logs
+      - soc_logs:/app/logs
     command: ["python", "-m", "pytest", "-m", "integration", "tests/integration", "-v"]
-
-volumes:
-  test_logs:

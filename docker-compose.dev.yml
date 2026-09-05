@@ -1,0 +1,22 @@
+# Optional host access for local infrastructure debugging.
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+
+  redis:
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+
+  zookeeper:
+    ports:
+      - "${ZOOKEEPER_HOST_PORT:-2181}:2181"
+
+  kafka:
+    ports:
+      - "${KAFKA_HOST_PORT:-9094}:9094"
+    environment:
+      KAFKA_CFG_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094
+      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:${KAFKA_HOST_PORT:-9094}
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL

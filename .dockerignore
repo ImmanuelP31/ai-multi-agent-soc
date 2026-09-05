@@ -1,18 +1,22 @@
-venv/
-.venv/
-__pycache__/
+**/venv/
+**/.venv/
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
+.coverage
+**/.pytest_cache/
+**/.ruff_cache/
+**/htmlcov/
 
 .git/
 .gitignore
 
-node_modules/
+**/node_modules/
+**/dist/
 
 datasets/
 data/
-models/
 checkpoints/
 weights/
 
@@ -24,7 +28,6 @@ weights/
 *.zip
 *.pt
 *.pth
-*.h5
 *.onnx
 
 logs/

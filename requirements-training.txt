@@ -1,0 +1,4 @@
+-r requirements-sequence.txt
+
+# Pandas needs a Parquet engine for the existing training dataset workflow.
+pyarrow==20.0.0

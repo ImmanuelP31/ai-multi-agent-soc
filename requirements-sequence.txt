@@ -1,0 +1,4 @@
+-r requirements-runtime.txt
+
+# Only the Investigation Agent and sequence training need TensorFlow.
+tensorflow-cpu==2.15.1; python_version < "3.12"

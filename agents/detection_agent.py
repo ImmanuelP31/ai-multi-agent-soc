@@ -218,6 +218,7 @@ def process_event(
 
 def main() -> None:
     from backend.database import init_db, persist_event
+    from common.health import start_health_server
     from common.kafka import (
         consume_forever,
         create_consumer,
@@ -226,9 +227,11 @@ def main() -> None:
     )
     from common.pipeline import run_stage
 
+    health = start_health_server("detection-agent")
     try:
         bundle = load_detection_runtime()
     except (ModelBundleError, ValueError) as exc:
+        health.set_not_ready("detection_configuration_error", error=str(exc))
         raise SystemExit(f"Detection configuration error: {exc}") from exc
 
     if bundle is None:
@@ -246,6 +249,14 @@ def main() -> None:
     consumer = create_consumer("soc_logs", "soc-detection")
     producer = create_producer()
     init_db()
+    health.set_ready(
+        detection_mode=DETECTION_MODE,
+        model_available=bundle is not None,
+        model_status="loaded" if bundle is not None else "explicit_fallback",
+        model_version=(
+            bundle.metadata.model_version if bundle is not None else FALLBACK_RULE_VERSION
+        ),
+    )
 
     def handle(payload: dict) -> None:
         event = run_stage(

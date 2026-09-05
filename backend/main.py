@@ -9,8 +9,10 @@ import os
 import threading
 import sys
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 # =========================================================
@@ -25,7 +27,7 @@ from backend.database import (
 
 from backend.routes import alerts as alerts_router
 from common.events import deserialize_event
-from common.kafka import consume_forever, create_consumer
+from common.kafka import SOC_TOPICS, check_kafka, consume_forever, create_consumer
 
 # =========================================================
 # OPTIONAL REDIS IMPORT
@@ -42,9 +44,23 @@ except Exception:
 
 app = FastAPI(title="AI SOC Backend")
 
+
+def configured_cors_origins() -> list[str]:
+    raw_origins = os.environ.get(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    )
+    origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+    if not origins:
+        raise ValueError("CORS_ALLOWED_ORIGINS must contain at least one origin")
+    if "*" in origins:
+        raise ValueError("Wildcard CORS is not allowed with credentialed requests")
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=configured_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,6 +80,7 @@ REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 
 REDIS_CHANNEL = "live_alerts"
+PIPELINE_HEALTH_URLS = os.environ.get("PIPELINE_HEALTH_URLS", "")
 
 # =========================================================
 # REDIS
@@ -231,9 +248,60 @@ def home():
 # =========================================================
 
 @app.get("/health")
-def health():
+def health(response: Response):
+    checks: dict[str, dict] = {}
 
+    try:
+        init_db()
+        checks["database"] = {"ready": True}
+    except Exception as exc:
+        checks["database"] = {"ready": False, "detail": str(exc)}
+
+    redis_client = get_redis()
+    checks["redis"] = {"ready": redis_client is not None}
+
+    try:
+        topics = check_kafka()
+        missing_topics = sorted(set(SOC_TOPICS) - set(topics))
+        checks["kafka"] = {
+            "ready": not missing_topics,
+            "topics": topics,
+            "missing_topics": missing_topics,
+        }
+    except Exception as exc:
+        checks["kafka"] = {"ready": False, "detail": str(exc)}
+
+    for configured in PIPELINE_HEALTH_URLS.split(","):
+        configured = configured.strip()
+        if not configured:
+            continue
+        name, separator, url = configured.partition("=")
+        if not separator or not name.strip() or not url.strip():
+            checks["pipeline_configuration"] = {
+                "ready": False,
+                "detail": f"Invalid pipeline health entry: {configured!r}",
+            }
+            continue
+        try:
+            with urlopen(url.strip(), timeout=2) as result:  # noqa: S310
+                payload = json.loads(result.read().decode("utf-8"))
+            checks[name.strip()] = {
+                "ready": bool(payload.get("ready")),
+                **payload,
+            }
+        except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+            checks[name.strip()] = {"ready": False, "detail": str(exc)}
+
+    is_ready = all(check.get("ready", False) for check in checks.values())
+    if not is_ready:
+        response.status_code = 503
     return {
-        "backend": "healthy",
-        "redis": bool(get_redis()),
+        "status": "ready" if is_ready else "not_ready",
+        "process": "running",
+        "checks": checks,
     }
+
+
+@app.get("/health/live")
+def liveness():
+    return {"status": "alive", "process": "running"}

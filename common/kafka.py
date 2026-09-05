@@ -11,6 +11,14 @@ from typing import Any
 
 from common.events import SOCEvent
 
+SOC_TOPICS = (
+    "soc_logs",
+    "soc_alerts",
+    "investigated_alerts",
+    "threat_enriched_alerts",
+    "remediation_actions",
+)
+
 
 def bootstrap_servers() -> str:
     return os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
@@ -37,6 +45,24 @@ def create_producer():
         retries=5,
         value_serializer=lambda value: json.dumps(value, default=str).encode("utf-8"),
     )
+
+
+def check_kafka(timeout_seconds: float = 3.0) -> list[str]:
+    """Verify broker reachability and return the currently visible topics."""
+
+    from kafka import KafkaAdminClient
+
+    timeout_ms = max(1, int(timeout_seconds * 1000))
+    client = KafkaAdminClient(
+        bootstrap_servers=bootstrap_servers(),
+        request_timeout_ms=timeout_ms,
+        api_version_auto_timeout_ms=timeout_ms,
+        client_id="soc-readiness",
+    )
+    try:
+        return sorted(client.list_topics())
+    finally:
+        client.close()
 
 
 def publish_event(producer, topic: str, event: SOCEvent) -> None:

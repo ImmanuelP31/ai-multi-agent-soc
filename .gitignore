@@ -1,9 +1,18 @@
 # Python
 __pycache__/
 *.pyc
+.coverage
+.pytest_cache/
+.ruff_cache/
+htmlcov/
 
 # Virtual Environment
 venv/
+.venv/
+
+# Local configuration
+.env
+.env.local
 
 # Models
 *.pkl
@@ -21,6 +30,9 @@ venv/
 
 # Logs
 logs/
+
+# Frontend build output
+frontend/dist/
 
 # OS Files
 .DS_Store

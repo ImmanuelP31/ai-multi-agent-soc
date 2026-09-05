@@ -272,6 +272,7 @@ def process_event(event: SOCEvent) -> SOCEvent:
 
 def main() -> None:
     from backend.database import init_db, persist_event
+    from common.health import start_health_server
     from common.kafka import (
         consume_forever,
         create_consumer,
@@ -280,10 +281,12 @@ def main() -> None:
     )
     from common.pipeline import run_stage
 
+    health = start_health_server("threat-intel-agent")
     processor = ThreatIntelProcessor()
     consumer = create_consumer("investigated_alerts", "soc-threat-intel")
     producer = create_producer()
     init_db()
+    health.set_ready(processor="mitre-mapping")
     print("Threat Intelligence Agent Running...\n")
 
     def handle(payload: dict) -> None:

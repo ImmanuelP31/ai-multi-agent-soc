@@ -23,7 +23,16 @@ from ml.sequence_detection.predictor import (
 )
 
 
-SEQUENCE_ARTIFACT_DIR = _repo_root / "ml" / "sequence_detection"
+SEQUENCE_ARTIFACT_DIR = Path(
+    os.environ.get(
+        "SEQUENCE_ARTIFACT_DIR",
+        str(_repo_root / "ml" / "sequence_detection"),
+    )
+)
+SEQUENCE_PREDICTION_MODE = os.environ.get(
+    "SEQUENCE_PREDICTION_MODE",
+    "optional",
+).strip().lower()
 
 ATTACK_CONTEXT = {
     "BENIGN": "No malicious pattern detected in the recent sequence.",
@@ -79,6 +88,23 @@ def create_runtime_predictor() -> SequencePredictor:
         SEQUENCE_ARTIFACT_DIR,
         ttl_seconds=ttl_seconds,
     )
+
+
+def validate_sequence_runtime(
+    predictor: SequencePredictor,
+    mode: str = SEQUENCE_PREDICTION_MODE,
+) -> None:
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"required", "optional"}:
+        raise ValueError(
+            "Unsupported SEQUENCE_PREDICTION_MODE "
+            f"'{mode}'. Use 'required' or 'optional'."
+        )
+    if normalized_mode == "required" and not predictor.available:
+        raise RuntimeError(
+            "LSTM sequence prediction is required but the model is unavailable: "
+            f"{predictor.model_status}: {predictor.unavailable_detail}"
+        )
 
 
 class InvestigationProcessor:
@@ -171,6 +197,7 @@ def process_event(
 
 def main() -> None:
     from backend.database import init_db, persist_event
+    from common.health import start_health_server
     from common.kafka import (
         consume_forever,
         create_consumer,
@@ -179,8 +206,14 @@ def main() -> None:
     )
     from common.pipeline import run_stage
 
+    health = start_health_server("investigation-agent")
     init_db()
     predictor = create_runtime_predictor()
+    try:
+        validate_sequence_runtime(predictor)
+    except (RuntimeError, ValueError) as exc:
+        health.set_not_ready("sequence_configuration_error", error=str(exc))
+        raise SystemExit(f"Investigation configuration error: {exc}") from exc
     processor = InvestigationProcessor(predictor)
     if predictor.available:
         print(
@@ -196,6 +229,13 @@ def main() -> None:
 
     consumer = create_consumer("soc_alerts", "soc-investigation")
     producer = create_producer()
+    health.set_ready(
+        sequence_prediction_mode=SEQUENCE_PREDICTION_MODE,
+        model_available=predictor.available,
+        model_status=predictor.model_status,
+        model_version=predictor.model_version,
+        state_backend="redis",
+    )
     print("Investigation Agent Running...\n")
 
     def handle(payload: dict) -> None:

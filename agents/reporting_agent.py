@@ -160,13 +160,16 @@ def print_report(report: dict) -> None:
 
 def main() -> None:
     from backend.database import init_db, persist_event
+    from common.health import start_health_server
     from common.kafka import consume_forever, create_consumer
     from common.pipeline import run_stage
 
+    health = start_health_server("reporting-agent")
     processor = ReportingProcessor()
     consumer = create_consumer("remediation_actions", "soc-reporting")
     init_db()
     summary = load_summary()
+    health.set_ready(processor="incident-reporting")
     print("Reporting Agent Running...\n")
 
     def handle(payload: dict) -> None:

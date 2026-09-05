@@ -24,8 +24,8 @@ It is designed to demonstrate production-oriented engineering skills across dist
 - PostgreSQL persistence for alert history and dashboard analytics.
 - Redis pub/sub bridge for live SOC feed updates.
 - Multi-agent workflow for detection, investigation, threat intelligence, remediation, and reporting.
-- ML-based anomaly and intrusion detection components.
-- LSTM-style sequence prediction surface for next-attack forecasting.
+- Isolation Forest anomaly detection with an explicit telemetry-rule demo mode.
+- Leakage-free LSTM sequence prediction when trained artifacts are supplied.
 - React dashboard with live stats, severity chart, alert table, predictions, and threat feed.
 - Fully Dockerized infrastructure for repeatable local runs.
 
@@ -101,7 +101,8 @@ ai-multi-agent-soc/
 ├── ml/                     # Training and sequence detection workflows
 ├── scripts/                # Attack simulator and operational scripts
 ├── docker-compose.yml      # Full local infrastructure
-├── Dockerfile              # Backend and agent runtime image
+├── docker-compose.dev.yml  # Optional host ports for infrastructure debugging
+├── Dockerfile              # Runtime, sequence, test, and training targets
 └── README.md
 ```
 
@@ -112,7 +113,12 @@ ai-multi-agent-soc/
 ```bash
 git clone https://github.com/ImmanuelP31/ai-multi-agent-soc.git
 cd ai-multi-agent-soc
+cp .env.example .env
 ```
+
+On Windows PowerShell, use `Copy-Item .env.example .env`. The example contains
+local-only values; choose a different URL-safe database password for any shared
+environment.
 
 ### 2. Start the SOC infrastructure
 
@@ -120,9 +126,10 @@ cd ai-multi-agent-soc
 docker compose up -d --build
 ```
 
-This starts PostgreSQL, runs `alembic upgrade head`, and then starts Redis,
-Zookeeper, Kafka, the FastAPI backend, and all SOC agents. Backend and agent
-containers start only after the migration succeeds.
+This starts PostgreSQL, Redis, ZooKeeper, Kafka, migrations, the backend, all
+five agents, and the frontend. A clean clone uses the visible `rule_based`
+detection demo mode and `optional` sequence mode. Trained ML modes are enabled
+explicitly only after their complete artifacts are generated.
 
 Check service status:
 
@@ -133,48 +140,35 @@ docker compose ps
 ### 3. Verify the backend
 
 ```bash
+curl http://127.0.0.1:8000/health/live
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/alerts/stats
 ```
 
-Backend URL:
+`/health/live` proves the API process is running. `/health` returns ready only
+when PostgreSQL, Redis, Kafka, every required topic, and every agent are ready;
+agent entries include the configured ML mode and actual model load status.
+
+Backend and frontend URLs:
 
 ```text
 http://127.0.0.1:8000
-```
-
-### 4. Run the frontend dashboard
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Open:
-
-```text
 http://127.0.0.1:5173
 ```
 
-### 5. Generate simulated attacks
+### 4. Generate simulated attacks
 
 From the repo root:
 
 ```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python scripts/attack_simulator.py
+docker compose exec backend python scripts/attack_simulator.py
 ```
 
-On Windows PowerShell:
+Only backend and frontend ports are published by default. To expose PostgreSQL,
+Redis, ZooKeeper, and Kafka for local debugging, opt in explicitly:
 
-```powershell
-python -m venv venv
-.\venv\Scripts\activate
-pip install -r requirements.txt
-python scripts\attack_simulator.py
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
 ## Anomaly Detection Bundle
@@ -188,10 +182,8 @@ remain under `ground_truth` and are never model inputs.
 Train and evaluate the complete bundle:
 
 ```bash
-docker compose build detection-agent
-docker compose run --rm --no-deps detection-agent python ml/training/train_anomaly_model.py
-docker compose run --rm --no-deps detection-agent python ml/training/evaluate_anomaly_model.py
-docker compose up -d detection-agent
+docker compose --profile training run --rm ml-training python ml/training/train_anomaly_model.py
+docker compose --profile training run --rm ml-training python ml/training/evaluate_anomaly_model.py
 ```
 
 Training writes `ml/models/anomaly_bundle.joblib`, containing the model,
@@ -200,10 +192,13 @@ thresholds. Evaluation writes `ml/models/anomaly_evaluation.json` with
 precision, recall, F1, confusion matrix, false-positive rate, false-negative
 rate, and detection rate.
 
-Compose configures `DETECTION_MODE=ml`, which fails clearly when the bundle is
-missing or incompatible. An explicit telemetry-only fallback can be selected
-with `DETECTION_MODE=rule_based`; alerts then report
+Generated artifacts are ignored by Git but included in Docker build contexts.
+After training, set `DETECTION_MODE=ml` in `.env` and run
+`docker compose up -d --build detection-agent`. ML mode fails clearly when the
+bundle is missing or incompatible. The clean-clone `rule_based` mode reports
 `detection_method: rule_based_fallback` and `model_status: explicit_fallback`.
+The obsolete standalone model/scaler/feature `.pkl` files were removed because
+the runtime accepts only the validated all-in-one bundle.
 
 ## LSTM Prediction Notes
 
@@ -227,20 +222,19 @@ a confusion matrix for both the LSTM and first-order Markov baseline.
 To enable the real LSTM path:
 
 ```bash
-python ml/sequence_detection/generate_rich_sequences.py
-python ml/sequence_detection/train_lstm_model.py
-python scripts/evaluate_sequence_model.py
-docker compose up -d --build investigation-agent
+docker compose --profile training run --rm ml-training python ml/sequence_detection/generate_rich_sequences.py
+docker compose --profile training run --rm ml-training python ml/sequence_detection/train_lstm_model.py
+docker compose --profile training run --rm ml-training python scripts/evaluate_sequence_model.py
 ```
 
 Training writes `sequence_dataset.npz`, `sequence_preprocessor.joblib`,
 `sequence_model.keras`, and machine-readable `sequence_evaluation.json` beside
-the versioned metadata. These generated artifacts are intentionally ignored by
-Git. When the compatible model and preprocessor are loaded, predictions begin
-after five telemetry events from the same source. If either artifact is absent
-or retraining is required, no rule-based next-attack prediction is substituted;
-alerts show `investigation_method: lstm_sequence_model_unavailable` and include
-the exact `lstm_status`.
+the versioned metadata. Set `SEQUENCE_PREDICTION_MODE=required` in `.env`, then
+run `docker compose up -d --build investigation-agent`. Required mode exits
+unless TensorFlow loads the complete compatible artifact set. Default
+`optional` mode keeps the unavailable reason visible in event metadata and
+readiness output and never substitutes a rule prediction. With a loaded model,
+predictions begin after five telemetry events from the same source.
 
 At runtime, Investigation stores each source identity in a separate bounded
 Redis list named `soc:sequence:<source-ip>`. Lists retain at most the configured
@@ -265,12 +259,23 @@ timestamp in the alert's investigation metadata.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /` | Backend status message |
-| `GET /health` | Backend and Redis health |
+| `GET /health/live` | Backend process liveness |
+| `GET /health` | Dependency, topic, agent, and model readiness |
 | `GET /alerts/` | Recent persisted SOC alerts |
 | `GET /alerts/stats` | Dashboard counters and severity chart data |
 | `WS /ws/live-alerts` | Live threat feed stream |
 
 ## Development Commands
+
+Pinned Python dependencies are separated by purpose:
+
+- `requirements-runtime.txt`: backend, Kafka agents, Redis, and anomaly runtime.
+- `requirements-sequence.txt`: runtime plus TensorFlow for Investigation.
+- `requirements-training.txt`: sequence dependencies plus Parquet support.
+- `requirements-dev.txt`: runtime plus Ruff, pytest, and coverage.
+
+Unused LightGBM, XGBoost, YARA, Capstone, Prometheus, HTTP clients, and frontend
+packages were removed because no current code path imports them.
 
 Apply database migrations without starting the full stack:
 
@@ -315,17 +320,15 @@ python -m pytest -m "not integration" --cov
 Run the replay smoke test in an isolated Docker Compose stack:
 
 ```bash
-docker compose -p ai-soc-step6 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml up -d --build
-docker compose -p ai-soc-step6 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml --profile test run --rm integration-test
-docker compose -p ai-soc-step6 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml down -v
+docker compose -p ai-soc-step7 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml up -d --build
+docker compose -p ai-soc-step7 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml --profile test run --rm integration-test
+docker compose -p ai-soc-step7 --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml down -v
 ```
 
 Follow useful logs:
 
 ```bash
-docker logs -f ai_soc_backend
-docker logs -f ai_soc_detection
-docker logs -f ai_soc_remediation
+docker compose logs -f backend detection-agent remediation-agent
 ```
 
 Stop everything:
