@@ -37,6 +37,7 @@ def wait_for_reporting(engine, previous_updated_at=None):
                 text(
                     "SELECT event_id, incident_id, current_stage, detection_method, "
                     "investigation_method, mitre_technique_id, remediation_actions, "
+                    "remediation_metadata, "
                     "updated_at FROM incidents WHERE event_id = :event_id"
                 ),
                 {"event_id": str(EVENT_ID)},
@@ -84,6 +85,11 @@ def test_replayed_event_produces_one_enriched_incident_and_report():
         assert first["investigation_method"]
         assert first["mitre_technique_id"] == "T1046"
         assert first["remediation_actions"]
+        assert first["remediation_metadata"]["dry_run"] is True
+        assert all(
+            "command" not in action and isinstance(action["argv_preview"], list)
+            for action in first["remediation_actions"]
+        )
         assert REPORT_PATH.is_file()
 
         report = json.loads(REPORT_PATH.read_text())
@@ -91,7 +97,10 @@ def test_replayed_event_produces_one_enriched_incident_and_report():
         assert report["incident_id"] == str(INCIDENT_ID)
 
         publish_event(producer, "soc_logs", event)
-        wait_for_reporting(engine, previous_updated_at=first["updated_at"])
+        second = wait_for_reporting(engine, previous_updated_at=first["updated_at"])
+        assert [action["action_id"] for action in second["remediation_actions"]] == [
+            action["action_id"] for action in first["remediation_actions"]
+        ]
     finally:
         producer.close(timeout=5)
 

@@ -245,6 +245,36 @@ back to an incomplete in-memory sequence. Successful predictions persist the
 top classes, primary confidence, sequence length, model version, and prediction
 timestamp in the alert's investigation metadata.
 
+## Remediation Safety Model
+
+Remediation remains simulation-only. Canonical schema `1.1` accepts only
+the typed actions `BLOCK_IP`, `RATE_LIMIT_IP`, `ISOLATE_USER`,
+`FLAG_USER_FOR_REVIEW`, `INCREASE_MONITORING`, `AUDIT_LOG`, and
+`ESCALATE_TO_ANALYST`. Each action has a deterministic ID derived from the
+incident, action type, target type, and normalized target, so replaying an event
+does not create a second logical response.
+
+IP targets are parsed with Python's `ipaddress` module before an action or argv
+preview is created. Missing, `unknown`, malformed, loopback, link-local,
+unspecified, and multicast addresses are never used for network-control
+actions. Valid private addresses are retained for realistic local demos, but
+only as dry-run targets; they receive the same approval classification as
+public addresses. User targets allow only a constrained identity character set.
+
+`BLOCK_IP`, `RATE_LIMIT_IP`, and `ISOLATE_USER` require approval for any
+non-dry-run executor. All other actions are automatic-safe. The repository ships
+only the `dry_run` executor, never invokes `shell=True` or `subprocess`, and
+stores display-only command previews as argument lists. Unsupported execution
+modes fail startup. `REMEDIATION_ALLOW_DESTRUCTIVE=false` remains the safe
+default for future executor implementations.
+
+Severity uses the shared `Severity` enum throughout detection, persistence,
+remediation, API statistics, and the dashboard. HIGH becomes CRITICAL only
+after an exact MITRE match with confidence of at least 0.90 corroborates an
+Impact or Privilege Escalation tactic, or after at least ten observed failed
+logins corroborate Credential Access. Fuzzy or predicted labels cannot trigger
+the promotion.
+
 ## Dashboard Features
 
 - Total alert, critical threat, and malware counters.

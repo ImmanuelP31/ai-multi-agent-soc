@@ -9,9 +9,14 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from common.remediation import (
+    ActionResult,
+    RemediationAction,
+)
 
-SCHEMA_VERSION = "1.0"
-PROCESSING_VERSION = "1.0.0"
+
+SCHEMA_VERSION = "1.1"
+PROCESSING_VERSION = "1.1.0"
 
 
 def utc_now() -> datetime:
@@ -24,6 +29,36 @@ class Severity(str, Enum):
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
+
+
+CRITICAL_THREAT_CONFIDENCE = 0.90
+CRITICAL_THREAT_TACTICS = frozenset({"Impact", "Privilege Escalation"})
+CRITICAL_FAILED_LOGIN_COUNT = 10
+
+
+def severity_with_threat_evidence(
+    severity: Severity,
+    *,
+    tactic: str | None,
+    confidence: float | None,
+    match_type: str | None,
+    failed_login_count: int | None,
+) -> Severity:
+    """Promote HIGH to CRITICAL only when corroborating threat evidence exists."""
+
+    if severity is not Severity.HIGH:
+        return severity
+    if match_type != "exact_match" or confidence is None:
+        return severity
+    if confidence < CRITICAL_THREAT_CONFIDENCE:
+        return severity
+    if tactic in CRITICAL_THREAT_TACTICS:
+        return Severity.CRITICAL
+    if tactic == "Credential Access" and (
+        failed_login_count or 0
+    ) >= CRITICAL_FAILED_LOGIN_COUNT:
+        return Severity.CRITICAL
+    return severity
 
 
 class StageName(str, Enum):
@@ -90,17 +125,13 @@ class ThreatIntelligenceMetadata(ContractModel):
     method: str | None = None
 
 
-class RemediationAction(ContractModel):
-    action: str
-    target: str | None = None
-    status: str
-    command: str | None = None
-    note: str | None = None
-    event: str | None = None
-
-
 class RemediationMetadata(ContractModel):
     actions: list[RemediationAction] = Field(default_factory=list)
+    results: list[ActionResult] = Field(default_factory=list)
+    executor: str | None = None
+    dry_run: bool | None = None
+    policy_version: str | None = None
+    destructive_execution_allowed: bool = False
     remediated_at: datetime | None = None
 
 

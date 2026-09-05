@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from sqlalchemy import func
 from backend import database as db
+from common.events import Severity
 
 router = APIRouter(
     prefix="/alerts",
@@ -81,6 +82,7 @@ def get_alerts(limit: int = 100, skip: int = 0):
                 "current_stage": r.current_stage,
                 "processing_version": r.processing_version,
                 "remediation_actions": r.remediation_actions or [],
+                "remediation_metadata": r.remediation_metadata or {},
                 "created_at": r.created_at.isoformat(),
                 "last_updated_at": (
                     r.updated_at.isoformat()
@@ -129,12 +131,10 @@ def get_stats():
             for sev, cnt in severity_rows
         }
 
-        for level in (
-            "LOW",
-            "MEDIUM",
-            "HIGH",
-            "CRITICAL",
-        ):
+        severity_levels = [
+            severity.value for severity in Severity if severity is not Severity.UNKNOWN
+        ]
+        for level in severity_levels:
             severity_counts.setdefault(level, 0)
 
         severity_chart = [
@@ -142,7 +142,7 @@ def get_stats():
                 "severity": level,
                 "count": severity_counts[level],
             }
-            for level in ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+            for level in severity_levels
         ]
 
         malware_count = (

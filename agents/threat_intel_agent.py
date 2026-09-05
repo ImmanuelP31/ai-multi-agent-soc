@@ -26,6 +26,7 @@ from common.events import (
     SOCEvent,
     StageName,
     ThreatIntelligenceMetadata,
+    severity_with_threat_evidence,
 )
 
 # =========================================================
@@ -254,6 +255,13 @@ class ThreatIntelProcessor:
             confidence=intel.confidence,
             recommended_action=intel.action,
             method=intel.match_type,
+        )
+        enriched.severity = severity_with_threat_evidence(
+            enriched.severity,
+            tactic=intel.tactic,
+            confidence=intel.confidence,
+            match_type=intel.match_type,
+            failed_login_count=enriched.detection.failed_login_count,
         )
         return enriched.advance_stage(StageName.THREAT_INTEL, "threat-intel-agent")
 

@@ -215,6 +215,8 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *app-environment
+      REMEDIATION_EXECUTION_MODE: ${REMEDIATION_EXECUTION_MODE:-dry_run}
+      REMEDIATION_ALLOW_DESTRUCTIVE: ${REMEDIATION_ALLOW_DESTRUCTIVE:-false}
     volumes:
       - soc_logs:/app/logs
     healthcheck: *agent-healthcheck

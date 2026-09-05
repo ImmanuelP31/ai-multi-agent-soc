@@ -7,13 +7,12 @@ from sqlalchemy import Float, create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from agents.remediation_agent import RemediationProcessor
 from backend import database
 from backend.routes.alerts import get_stats
 from common.events import (
     DetectionMetadata,
     InvestigationMetadata,
-    RemediationAction,
-    RemediationMetadata,
     SOCEvent,
     Severity,
     StageName,
@@ -70,20 +69,7 @@ def enrich_event(event: SOCEvent) -> tuple[SOCEvent, SOCEvent, SOCEvent, SOCEven
         "threat-intel-agent",
     )
 
-    remediated = threat_enriched.model_copy(deep=True)
-    remediated.remediation = RemediationMetadata(
-        actions=[
-            RemediationAction(
-                action="block_ip",
-                target=event.source_ip,
-                status="simulated",
-            )
-        ]
-    )
-    remediated = remediated.advance_stage(
-        StageName.REMEDIATION,
-        "remediation-agent",
-    )
+    remediated = RemediationProcessor().process(threat_enriched)
     return detected, investigated, threat_enriched, remediated
 
 
@@ -136,7 +122,7 @@ class IncidentPersistenceTests(DatabaseTestCase):
             self.assertEqual(row.mitre_technique_id, "T1046")
             self.assertEqual(row.mitre_technique_name, "Network Service Discovery")
             self.assertEqual(row.threat_intelligence_method, "exact_match")
-            self.assertEqual(row.remediation_actions[0]["action"], "block_ip")
+            self.assertEqual(row.remediation_actions[0]["action"], "BLOCK_IP")
 
     def test_prediction_confidence_is_numeric(self):
         _, investigated, _, _ = enrich_event(base_event())

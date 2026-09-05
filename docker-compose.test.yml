@@ -26,4 +26,13 @@ services:
       RUN_INTEGRATION: "1"
     volumes:
       - soc_logs:/app/logs
-    command: ["python", "-m", "pytest", "-m", "integration", "tests/integration", "-v"]
+    command:
+      - python
+      - -m
+      - pytest
+      - -p
+      - no:cacheprovider
+      - -m
+      - integration
+      - tests/integration
+      - -v

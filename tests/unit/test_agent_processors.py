@@ -247,8 +247,10 @@ def test_remediation_never_builds_commands_for_unsafe_ip(source_ip):
         make_event(severity=Severity.HIGH, source_ip=source_ip)
     )
 
-    assert result.remediation.actions[0].action == "MANUAL_REMEDIATION_REQUIRED"
-    assert all(action.command is None for action in result.remediation.actions)
+    action_types = [action.action for action in result.remediation.actions]
+    assert "BLOCK_IP" not in action_types
+    assert "ESCALATE_TO_ANALYST" in action_types
+    assert all(source_ip not in action.argv_preview for action in result.remediation.actions)
 
 
 def test_remediation_handles_missing_and_unsafe_user():
@@ -261,8 +263,8 @@ def test_remediation_handles_missing_and_unsafe_user():
 
     assert "ISOLATE_USER" not in [item.action for item in missing.remediation.actions]
     unsafe_user = unsafe.remediation.actions[1]
-    assert unsafe_user.action == "MANUAL_REMEDIATION_REQUIRED"
-    assert unsafe_user.command is None
+    assert unsafe_user.action == "ESCALATE_TO_ANALYST"
+    assert unsafe_user.argv_preview == []
 
 
 def test_reporting_processor_keeps_identity_and_one_report(tmp_path):
