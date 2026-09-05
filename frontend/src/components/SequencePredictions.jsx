@@ -1,35 +1,12 @@
-import { useEffect, useState } from "react";
-import api from "../services/api";
+import { useSequencePredictions } from "../hooks/useSocQueries";
+import { alertStableKey } from "../services/alertCache";
 
 export default function SequencePredictions() {
-  const [predictions, setPredictions] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const fetchPredictions = () => {
-    api
-      .get("/alerts/?limit=20")
-      .then((res) => {
-        const withPredictions = res.data
-          .filter(
-            (a) =>
-              (a.predicted_next_attack && a.predicted_next_attack !== "BENIGN") ||
-              a.investigation_method === "lstm_sequence_model_unavailable"
-          )
-          .slice(0, 5);
-        setPredictions(withPredictions);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error(err);
-        setLoading(false);
-      });
-  };
-
-  useEffect(() => {
-    fetchPredictions();
-    const interval = setInterval(fetchPredictions, 10000);
-    return () => clearInterval(interval);
-  }, []);
+  const {
+    data: predictions = [],
+    isPending: loading,
+    isError: error,
+  } = useSequencePredictions();
 
   return (
     <div className="card">
@@ -42,15 +19,20 @@ export default function SequencePredictions() {
 
       {loading && <p className="muted">Loading predictions...</p>}
 
-      {!loading && predictions.length === 0 && (
+      {error && <p className="muted text-danger">Could not load predictions</p>}
+
+      {!loading && !error && predictions.length === 0 && (
         <p className="muted">
           No predictions yet - run attack_simulator.py to generate events.
         </p>
       )}
 
       <ul className="space-y-3">
-        {predictions.map((alert, idx) => (
-          <li key={idx} className="rounded-lg border border-border bg-slate-950/50 p-3">
+        {predictions.map((alert) => (
+          <li
+            key={alertStableKey(alert)}
+            className="rounded-lg border border-border bg-slate-950/50 p-3"
+          >
             <div className="flex justify-between gap-4">
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-white">
@@ -71,7 +53,7 @@ export default function SequencePredictions() {
                 <p className="mt-0.5 text-xs text-slate-400">
                   Triggered by:{" "}
                   <span className="text-yellow-400">{alert.event?.replace(/_/g, " ")}</span>
-                  {" "}from {alert.ip || "unknown IP"}
+                  {" "}from {alert.source_ip || "unknown IP"}
                 </p>
                 {alert.investigation && (
                   <p className="mt-1 max-h-8 overflow-hidden text-xs text-slate-500">
@@ -79,9 +61,9 @@ export default function SequencePredictions() {
                   </p>
                 )}
               </div>
-              {alert.confidence && (
+              {Number.isFinite(alert.confidence) && (
                 <span className="whitespace-nowrap text-xs font-bold text-green-400">
-                  {(parseFloat(alert.confidence) * 100).toFixed(1)}%
+                  {(alert.confidence * 100).toFixed(1)}%
                 </span>
               )}
             </div>

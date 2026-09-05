@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -9,7 +8,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import api from "../services/api";
+import { useAlertStats } from "../hooks/useSocQueries";
 
 const SEVERITY_COLORS = {
   LOW: "#22c55e",
@@ -19,36 +18,14 @@ const SEVERITY_COLORS = {
 };
 
 export default function SeverityChart() {
-  const [data, setData] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  const fetchStats = () => {
-    api
-      .get("/alerts/stats")
-      .then((res) => {
-        setData(res.data.severity_chart || []);
-        setError(null);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error(err);
-        setError("Could not load stats");
-        setLoading(false);
-      });
-  };
-
-  useEffect(() => {
-    fetchStats();
-    const interval = setInterval(fetchStats, 10000);
-    return () => clearInterval(interval);
-  }, []);
+  const { data: stats, isPending: loading, isError: error } = useAlertStats();
+  const data = stats?.severity_chart || [];
 
   return (
     <div className="card">
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 className="panel-title">Severity Distribution</h2>
-        {error && <span className="text-xs text-danger">{error}</span>}
+        {error && <span className="text-xs text-danger">Could not load stats</span>}
       </div>
 
       {loading ? (

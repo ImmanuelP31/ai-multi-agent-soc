@@ -1,31 +1,8 @@
-import { useEffect, useState } from "react";
-import api from "../services/api";
+import { useAlerts } from "../hooks/useSocQueries";
+import { alertStableKey } from "../services/alertCache";
 
 function AlertTable() {
-  const [alerts, setAlerts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-
-  const fetchAlerts = () => {
-    api
-      .get("/alerts/?limit=100")
-      .then((res) => {
-        setAlerts(res.data);
-        setError(false);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error(err);
-        setError(true);
-        setLoading(false);
-      });
-  };
-
-  useEffect(() => {
-    fetchAlerts();
-    const interval = setInterval(fetchAlerts, 10000);
-    return () => clearInterval(interval);
-  }, []);
+  const { data: alerts = [], isPending: loading, isError: error } = useAlerts();
 
   const formatTime = (timestamp) => {
     if (!timestamp) return "-";
@@ -70,7 +47,7 @@ function AlertTable() {
             )}
 
             {alerts.map((alert) => (
-              <tr key={alert.id} className="hover:bg-slate-800/40">
+              <tr key={alertStableKey(alert)} className="hover:bg-slate-800/40">
                 <td className="px-5 py-3 text-slate-400">{alert.id}</td>
                 <td className="truncate px-5 py-3 text-slate-100">{alert.event || "-"}</td>
                 <td className="px-5 py-3">
@@ -78,7 +55,9 @@ function AlertTable() {
                     {alert.severity || "LOW"}
                   </span>
                 </td>
-                <td className="truncate px-5 py-3 text-slate-300">{alert.ip || "-"}</td>
+                <td className="truncate px-5 py-3 text-slate-300">
+                  {alert.source_ip || "-"}
+                </td>
                 <td className="truncate px-5 py-3 text-slate-400">
                   {formatTime(alert.timestamp)}
                 </td>

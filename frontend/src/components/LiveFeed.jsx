@@ -1,14 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-
-const WS_URL =
-  import.meta.env.VITE_WS_URL ||
-  `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/live-alerts`;
+import { useLiveAlerts } from "../hooks/useLiveAlerts";
 
 const SEVERITY_COLOR = {
   CRITICAL: "border-red-500 bg-red-950",
   HIGH: "border-orange-500 bg-orange-950",
   MEDIUM: "border-yellow-500 bg-yellow-950",
   LOW: "border-green-600 bg-green-950",
+  UNKNOWN: "border-gray-600 bg-gray-900",
 };
 
 const SEVERITY_TEXT = {
@@ -16,70 +13,11 @@ const SEVERITY_TEXT = {
   HIGH: "text-orange-400",
   MEDIUM: "text-yellow-400",
   LOW: "text-green-400",
+  UNKNOWN: "text-gray-400",
 };
 
 export default function LiveFeed() {
-  const [alerts, setAlerts] = useState([]);
-  const [status, setStatus] = useState("connecting");
-  const socketRef = useRef(null);
-  const reconnectTimer = useRef(null);
-  const stoppedRef = useRef(false);
-
-  useEffect(() => {
-    stoppedRef.current = false;
-
-    const connect = () => {
-      if (stoppedRef.current) return;
-
-      if (socketRef.current) {
-        socketRef.current.close();
-      }
-
-      setStatus("connecting");
-      const socket = new WebSocket(WS_URL);
-      socketRef.current = socket;
-
-      socket.onopen = () => {
-        setStatus("connected");
-        if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      };
-
-      socket.onmessage = (event) => {
-        let data;
-
-        try {
-          data = JSON.parse(event.data);
-        } catch {
-          data = {
-            event: "stream_message",
-            severity: "LOW",
-            message: String(event.data),
-          };
-        }
-
-        setAlerts((prev) => [data, ...prev.slice(0, 19)]);
-      };
-
-      socket.onerror = () => {
-        setStatus("disconnected");
-      };
-
-      socket.onclose = () => {
-        setStatus("disconnected");
-        if (!stoppedRef.current) {
-          reconnectTimer.current = setTimeout(connect, 3000);
-        }
-      };
-    };
-
-    connect();
-
-    return () => {
-      stoppedRef.current = true;
-      if (socketRef.current) socketRef.current.close();
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-    };
-  }, []);
+  const { alerts, status } = useLiveAlerts();
 
   const statusDot = {
     connecting: "bg-yellow-400 animate-pulse",
@@ -106,8 +44,8 @@ export default function LiveFeed() {
       )}
 
       <div className="max-h-[480px] space-y-3 overflow-y-auto pr-1">
-        {alerts.map((alert, index) => {
-          const sev = alert.severity || "LOW";
+        {alerts.map((alert) => {
+          const sev = alert.severity || "UNKNOWN";
           const cardCls = SEVERITY_COLOR[sev] || "border-gray-600 bg-gray-900";
           const textCls = SEVERITY_TEXT[sev] || "text-gray-400";
           const threatIntel = alert.threat_intelligence || {};
@@ -119,7 +57,7 @@ export default function LiveFeed() {
             .join(" - ") || alert.mitre_attack;
 
           return (
-            <div key={index} className={`rounded-lg border p-3 ${cardCls}`}>
+            <div key={alert._feed_key} className={`rounded-lg border p-3 ${cardCls}`}>
               <div className="flex items-start justify-between gap-3">
                 <p className={`truncate text-sm font-bold ${textCls}`}>
                   {alert.event?.replace(/_/g, " ").toUpperCase() || "SYSTEM"}
@@ -130,7 +68,7 @@ export default function LiveFeed() {
               </div>
 
               <div className="mt-1 grid grid-cols-2 gap-x-4 text-xs text-slate-400">
-                <span className="truncate">IP: {alert.ip || "-"}</span>
+                <span className="truncate">IP: {alert.source_ip || "-"}</span>
                 <span className="truncate">User: {alert.user || "-"}</span>
               </div>
 
@@ -147,7 +85,9 @@ export default function LiveFeed() {
               {alert.predicted_next_attack && (
                 <p className="mt-0.5 text-xs text-cyan-400">
                   Next predicted: {alert.predicted_next_attack}
-                  {alert.confidence ? ` (${(alert.confidence * 100).toFixed(1)}%)` : ""}
+                  {Number.isFinite(alert.confidence)
+                    ? ` (${(alert.confidence * 100).toFixed(1)}%)`
+                    : ""}
                 </p>
               )}
 

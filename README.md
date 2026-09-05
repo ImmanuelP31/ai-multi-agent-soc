@@ -80,7 +80,7 @@ is no second sequence consumer or parallel prediction topic.
 
 | Layer | Tools |
 | --- | --- |
-| Frontend | React, Vite, Tailwind CSS, Recharts, Framer Motion |
+| Frontend | React, Vite, Tailwind CSS, TanStack React Query, Recharts, Framer Motion |
 | Backend | FastAPI, SQLAlchemy, WebSockets |
 | Streaming | Apache Kafka, Zookeeper |
 | Realtime | Redis pub/sub and durable sequence windows |
@@ -344,6 +344,7 @@ Run frontend checks:
 
 ```bash
 cd frontend
+npm test
 npm run lint
 npm run build
 ```

@@ -1,37 +1,16 @@
-import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { FaShieldAlt, FaBug, FaExclamationTriangle } from "react-icons/fa";
-import api from "../services/api";
+import { useAlertStats } from "../hooks/useSocQueries";
+
+const EMPTY_STATS = {
+  total_alerts: 0,
+  critical_count: 0,
+  malware_count: 0,
+};
 
 export default function StatsCards() {
-  const [stats, setStats] = useState({
-    total_alerts: 0,
-    critical_count: 0,
-    malware_count: 0,
-  });
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-
-  const fetchStats = () => {
-    api
-      .get("/alerts/stats")
-      .then((res) => {
-        setStats(res.data);
-        setError(false);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error(err);
-        setError(true);
-        setLoading(false);
-      });
-  };
-
-  useEffect(() => {
-    fetchStats();
-    const interval = setInterval(fetchStats, 10000);
-    return () => clearInterval(interval);
-  }, []);
+  const { data: stats = EMPTY_STATS, isPending: loading, isError: error } =
+    useAlertStats();
 
   const cards = [
     {
